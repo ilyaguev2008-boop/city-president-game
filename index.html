@@ -35,6 +35,118 @@
         color: var(--text-main);
         min-height: 100vh;
       }
+      /* Тёмная тема для всех вкладок кроме Город */
+      body.dark-theme {
+        background: #0f0f0f;
+        color: #e5e7eb;
+      }
+      body.dark-theme .card {
+        background: #1a1a1a;
+        border-color: rgba(255,255,255,0.08);
+        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+      }
+      body.dark-theme .title,
+      body.dark-theme .story-text { color: #f1f5f9; }
+      body.dark-theme .subtitle,
+      body.dark-theme .story-label,
+      body.dark-theme .text-muted,
+      body.dark-theme .res-label,
+      body.dark-theme .choice-hotkey,
+      body.dark-theme .meta-pill,
+      body.dark-theme .building-info .building-stats { color: #94a3b8; }
+      body.dark-theme .res-value,
+      body.dark-theme .pill { color: #a5b4fc; }
+      body.dark-theme .res-pill {
+        background: #262626;
+        border-color: rgba(255,255,255,0.06);
+      }
+      body.dark-theme .story {
+        background: #262626;
+        border-color: rgba(255,255,255,0.06);
+      }
+      body.dark-theme .choice-btn {
+        background: #262626;
+        border-color: rgba(255,255,255,0.08);
+        color: #f1f5f9;
+      }
+      body.dark-theme .choice-btn:hover {
+        border-color: rgba(165,180,252,0.4);
+      }
+      body.dark-theme .choice-btn.primary {
+        background: linear-gradient(135deg, #4f46e5, #4338ca);
+        color: #fff;
+      }
+      body.dark-theme .economy-sub-btn {
+        background: #262626;
+        border-color: rgba(255,255,255,0.08);
+        color: #94a3b8;
+      }
+      body.dark-theme .economy-sub-btn.active {
+        background: linear-gradient(135deg, #4f46e5, #4338ca);
+        color: #fff;
+      }
+      body.dark-theme .progress { background: #262626; }
+      body.dark-theme .building-icon {
+        background: #262626;
+        border-color: rgba(255,255,255,0.08);
+      }
+      body.dark-theme .bonus-card {
+        background: #262626;
+        border-color: rgba(255,255,255,0.06);
+      }
+      body.dark-theme .bonus-card h4 { color: #a5b4fc; }
+      body.dark-theme .bonus-card p { color: #94a3b8; }
+      body.dark-theme .screen-placeholder { color: #94a3b8; }
+      body.dark-theme .screen-placeholder h3 { color: #a5b4fc; }
+      /* Вкладка Город: полноэкранный фон города */
+      body.city-tab .root { padding: 0; }
+      body.city-tab .card {
+        max-width: none;
+        border-radius: 0;
+        background: transparent;
+        border: none;
+        box-shadow: none;
+      }
+      body.city-tab .header,
+      body.city-tab .resources {
+        background: rgba(15,15,15,0.85);
+        margin: 0 -16px;
+        padding: 10px 16px;
+        border-radius: 0;
+      }
+      body.city-tab .title,
+      body.city-tab .res-value,
+      body.city-tab .pill { color: #f1f5f9; }
+      body.city-tab .subtitle,
+      body.city-tab .res-label { color: #94a3b8; }
+      body.city-tab .res-pill {
+        background: rgba(38,38,38,0.9);
+        border-color: rgba(255,255,255,0.08);
+      }
+      body.city-tab #screen-placeholder {
+        position: fixed;
+        left: 0;
+        right: 0;
+        top: 0;
+        bottom: var(--nav-height);
+        padding: 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        background: transparent;
+      }
+      body.city-tab #screen-placeholder .city-circle-wrap {
+        flex: 1;
+        min-height: 100%;
+        border-radius: 0;
+      }
+      body.city-tab #screen-placeholder .city-bg {
+        background: url('https://images.unsplash.com/photo-1519501025264-65ba15a82390?w=800') center/cover no-repeat;
+        opacity: 0.85;
+      }
+      body.city-tab #screen-placeholder .city-bg-overlay {
+        background: linear-gradient(180deg, rgba(15,15,15,0.25) 0%, rgba(15,15,15,0.5) 100%);
+      }
       .root {
         min-height: 100vh;
         display: flex;
@@ -231,16 +343,15 @@
       .danger {
         color: var(--danger);
       }
-      /* Bottom navigation */
+      /* Bottom navigation — тёмная панель как в референсе */
       .bottom-nav {
         position: fixed;
         bottom: 0;
         left: 0;
         right: 0;
         height: var(--nav-height);
-        background: var(--bg-elevated);
-        border-top: 1px solid rgba(79, 70, 229, 0.18);
-        box-shadow: 0 -4px 20px rgba(0,0,0,0.08);
+        background: #0f0f0f;
+        border-top: 1px solid rgba(255,255,255,0.06);
         display: flex;
         align-items: stretch;
         justify-content: space-around;
@@ -252,26 +363,26 @@
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        gap: 2px;
-        padding: 6px 4px;
+        gap: 4px;
+        padding: 8px 4px;
         background: none;
         border: none;
         cursor: pointer;
         font-size: 10px;
         font-weight: 600;
-        color: var(--text-muted);
+        color: #94a3b8;
         transition: color 0.2s, background 0.2s;
       }
       .nav-btn:hover {
-        color: var(--accent);
-        background: var(--accent-soft);
+        color: #e2e8f0;
+        background: rgba(255,255,255,0.05);
       }
       .nav-btn.active {
-        color: var(--accent);
-        background: var(--accent-soft);
+        color: #fff;
+        background: rgba(255,255,255,0.1);
       }
       .nav-btn .nav-icon {
-        font-size: 18px;
+        font-size: 20px;
         line-height: 1;
       }
       .screen-placeholder {
@@ -435,7 +546,7 @@
             <div class="res-value" id="res-population">0</div>
           </div>
           <div class="res-pill">
-            <div class="res-label">Экономика</div>
+            <div class="res-label">Доход в час</div>
             <div class="res-value" id="res-economy">0</div>
           </div>
           <div class="res-pill">

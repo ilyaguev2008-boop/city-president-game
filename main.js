@@ -129,6 +129,8 @@ const TAB_TITLES = {
 
 function setActiveTab(tab) {
   currentTab = tab;
+  document.body.classList.toggle("dark-theme", tab !== "city");
+  document.body.classList.toggle("city-tab", tab === "city");
   el.title.textContent = "City President";
   el.subtitle.textContent = TAB_TITLES[tab] ? TAB_TITLES[tab].subtitle : tab;
   document.querySelectorAll(".nav-btn").forEach((btn) => {
@@ -235,11 +237,11 @@ function fmtMoney(v) {
 function updateResourcesUI() {
   el.resMoney.textContent = fmtMoney(state.money);
   el.resPopulation.textContent = fmtMoney(state.population);
-  el.resEconomy.textContent = fmtMoney(state.economy);
+  const perHour = calcTotalIncomePerHour();
+  el.resEconomy.textContent = perHour > 0 ? `${fmtMoney(perHour)} ₽` : "0 ₽";
   if (el.resEnergy) {
     el.resEnergy.textContent = `${state.energy}/${state.maxEnergy}`;
   }
-  const perHour = calcTotalIncomePerHour();
   el.metaNode.textContent = perHour > 0 ? `Доход: ${fmtMoney(perHour)} ₽/час` : "Доход: 0 ₽/час";
 }
 
