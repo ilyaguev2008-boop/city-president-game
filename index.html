@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>Моя Telegram-игра</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap"
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #050814;
+        --bg-elevated: #0f172a;
+        --accent: #38bdf8;
+        --accent-soft: rgba(56, 189, 248, 0.12);
+        --text-main: #e5e7eb;
+        --text-muted: #9ca3af;
+        --danger: #f97373;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 0;
+        font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+        background: radial-gradient(circle at top, #1f2937 0, var(--bg) 55%);
+        color: var(--text-main);
+      }
+      .root {
+        min-height: 100vh;
+        display: flex;
+        align-items: stretch;
+        justify-content: center;
+        padding: 16px;
+      }
+      .card {
+        width: 100%;
+        max-width: 480px;
+        background: linear-gradient(145deg, #020617, #020617 40%, #0b1120 70%, #020617);
+        border-radius: 18px;
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        box-shadow: 0 18px 50px rgba(15, 23, 42, 0.9);
+        padding: 16px 16px 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .resources {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 4px;
+      }
+      .res-pill {
+        flex: 1 1 30%;
+        min-width: 0;
+        padding: 6px 8px;
+        border-radius: 10px;
+        background: rgba(15, 23, 42, 0.9);
+        border: 1px solid rgba(55, 65, 81, 0.9);
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .res-label {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: var(--text-muted);
+      }
+      .res-value {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .title-block {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .title {
+        font-size: 18px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+      .subtitle {
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+      .pill {
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(56, 189, 248, 0.65);
+        background: radial-gradient(circle at top left, var(--accent-soft), transparent);
+        font-size: 11px;
+        color: var(--accent);
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        white-space: nowrap;
+      }
+      .pill-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: #22c55e;
+        box-shadow: 0 0 4px #22c55e;
+      }
+      .story {
+        margin-top: 4px;
+        padding: 12px 12px 14px;
+        border-radius: 14px;
+        background: radial-gradient(circle at top left, #111827, #020617);
+        border: 1px solid rgba(31, 41, 55, 0.9);
+        min-height: 96px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .story-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.13em;
+        color: var(--text-muted);
+      }
+      .story-text {
+        font-size: 14px;
+        line-height: 1.45;
+      }
+      .choices {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-top: 4px;
+      }
+      .choice-btn {
+        width: 100%;
+        border-radius: 999px;
+        border: 1px solid rgba(55, 65, 81, 0.9);
+        background: rgba(15, 23, 42, 0.9);
+        padding: 9px 13px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        color: var(--text-main);
+        font-size: 14px;
+        cursor: pointer;
+        transition: all 0.16s ease-out;
+      }
+      .choice-btn span {
+        pointer-events: none;
+      }
+      .choice-btn:hover {
+        border-color: rgba(148, 163, 184, 0.9);
+        transform: translateY(-1px);
+        box-shadow: 0 6px 16px rgba(15, 23, 42, 0.8);
+      }
+      .choice-btn.primary {
+        background: linear-gradient(145deg, #0ea5e9, #38bdf8);
+        border-color: transparent;
+        color: #0b1120;
+        box-shadow: 0 10px 25px rgba(56, 189, 248, 0.35);
+      }
+      .choice-hotkey {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .status-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 6px;
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .progress {
+        position: relative;
+        flex: 1;
+        height: 5px;
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.95);
+        overflow: hidden;
+        margin-right: 10px;
+      }
+      .progress-fill {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 0;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #22c55e, #eab308, #f97316);
+        transition: width 0.2s ease-out;
+      }
+      .meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .meta-pill {
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.9);
+        border: 1px solid rgba(55, 65, 81, 0.9);
+      }
+      .danger {
+        color: var(--danger);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="root">
+      <div class="card">
+        <div class="header">
+          <div class="title-block">
+            <div class="title" id="game-title">City President</div>
+            <div class="subtitle" id="game-subtitle">Экономика города</div>
+          </div>
+          <div class="pill">
+            <div class="pill-dot"></div>
+            Mini App
+          </div>
+        </div>
+
+        <div class="resources">
+          <div class="res-pill">
+            <div class="res-label">Деньги</div>
+            <div class="res-value" id="res-money">0</div>
+          </div>
+          <div class="res-pill">
+            <div class="res-label">Население</div>
+            <div class="res-value" id="res-population">0</div>
+          </div>
+          <div class="res-pill">
+            <div class="res-label">Экономика</div>
+            <div class="res-value" id="res-economy">0</div>
+          </div>
+        </div>
+
+        <div class="story">
+          <div class="story-label">Сейчас происходит</div>
+          <div class="story-text" id="story-text"></div>
+        </div>
+
+        <div class="choices" id="choices"></div>
+
+        <div class="status-bar">
+          <div class="progress">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+          <div class="meta">
+            <div class="meta-pill" id="meta-node">Сцена 1</div>
+            <div class="meta-pill" id="meta-ending"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="./main.js"></script>
+  </body>
+</html>
+
