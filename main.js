@@ -175,9 +175,9 @@ function renderCity() {
       <div class="city-bg" aria-hidden="true"></div>
       <div class="city-bg-overlay" aria-hidden="true"></div>
       <div class="city-content">
-        <p style="margin:0;font-size:13px;">Нажми на кружок — получишь <b>${fmtMoney(state.clickIncome)} ₽</b>. Тратится 1 энергия.</p>
         <div class="city-circle ${state.energy <= 0 ? "disabled" : ""}" id="city-circle" role="button" tabindex="0">
-          💰<br><span style="font-size:14px;">Клик</span>
+          <span class="city-circle-emoji">💰</span>
+          <span class="city-circle-label">Клик</span>
         </div>
         <div class="energy-bar-wrap">
           <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px;">
@@ -188,7 +188,7 @@ function renderCity() {
             <div class="energy-fill" id="city-energy-fill" style="width:${energyPct}%"></div>
           </div>
         </div>
-        <p style="margin:0;font-size:11px;">Восстановление: ${state.energyPerHour} ед/час</p>
+        <p class="city-hint" style="margin:0;font-size:12px;opacity:0.9;">+${fmtMoney(state.clickIncome)} ₽ за клик · восст. ${state.energyPerHour}/час</p>
       </div>
     </div>
   `;
