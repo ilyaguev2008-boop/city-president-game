@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>Моя Telegram-игра</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap"
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f0f4ff;
+        --bg-elevated: #ffffff;
+        --accent: #6366f1;
+        --accent-soft: rgba(99, 102, 241, 0.15);
+        --text-main: #1e293b;
+        --text-muted: #64748b;
+        --danger: #ef4444;
+        --success: #22c55e;
+        --gold: #f59e0b;
+        --nav-height: 56px;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 0;
+        padding-bottom: var(--nav-height);
+        font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+        background: linear-gradient(160deg, #e0e7ff 0%, #fce7f3 40%, #fef3c7 100%);
+        color: var(--text-main);
+        min-height: 100vh;
+      }
+      .root {
+        min-height: 100vh;
+        display: flex;
+        align-items: stretch;
+        justify-content: center;
+        padding: 12px 12px 16px;
+      }
+      .card {
+        width: 100%;
+        max-width: 480px;
+        background: var(--bg-elevated);
+        border-radius: 20px;
+        border: 2px solid rgba(99, 102, 241, 0.2);
+        box-shadow: 0 8px 32px rgba(99, 102, 241, 0.12), 0 2px 8px rgba(0,0,0,0.06);
+        padding: 16px 16px 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .resources {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 4px;
+      }
+      .res-pill {
+        flex: 1 1 30%;
+        min-width: 0;
+        padding: 8px 10px;
+        border-radius: 12px;
+        background: linear-gradient(135deg, #eef2ff, #e0e7ff);
+        border: 1px solid rgba(99, 102, 241, 0.3);
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .res-label {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--text-muted);
+      }
+      .res-value {
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--accent);
+      }
+      .title-block {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .title {
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        color: var(--text-main);
+      }
+      .subtitle {
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+      .pill {
+        padding: 5px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--accent);
+        background: var(--accent-soft);
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--accent);
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        white-space: nowrap;
+      }
+      .pill-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: var(--success);
+        box-shadow: 0 0 6px var(--success);
+      }
+      .story {
+        margin-top: 4px;
+        padding: 14px 14px 16px;
+        border-radius: 14px;
+        background: linear-gradient(135deg, #f5f3ff, #ede9fe);
+        border: 1px solid rgba(99, 102, 241, 0.25);
+        min-height: 80px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .story-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: var(--text-muted);
+      }
+      .story-text {
+        font-size: 14px;
+        line-height: 1.5;
+        color: var(--text-main);
+      }
+      .choices {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-top: 4px;
+      }
+      .choice-btn {
+        width: 100%;
+        border-radius: 14px;
+        border: 2px solid rgba(99, 102, 241, 0.3);
+        background: linear-gradient(135deg, #faf5ff, #f5f3ff);
+        padding: 10px 14px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        color: var(--text-main);
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s ease;
+      }
+      .choice-btn span {
+        pointer-events: none;
+      }
+      .choice-btn:hover {
+        border-color: var(--accent);
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(99, 102, 241, 0.2);
+      }
+      .choice-btn.primary {
+        background: linear-gradient(135deg, #818cf8, #6366f1);
+        border-color: transparent;
+        color: #fff;
+        box-shadow: 0 4px 14px rgba(99, 102, 241, 0.4);
+      }
+      .choice-btn.disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      .choice-hotkey {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .status-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 6px;
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .progress {
+        position: relative;
+        flex: 1;
+        height: 6px;
+        border-radius: 999px;
+        background: #e0e7ff;
+        overflow: hidden;
+        margin-right: 10px;
+      }
+      .progress-fill {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 0;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #22c55e, #eab308, #f97316);
+        transition: width 0.2s ease-out;
+      }
+      .meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .meta-pill {
+        padding: 3px 10px;
+        border-radius: 999px;
+        background: #e0e7ff;
+        border: 1px solid rgba(99, 102, 241, 0.3);
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .danger {
+        color: var(--danger);
+      }
+      /* Bottom navigation */
+      .bottom-nav {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: var(--nav-height);
+        background: var(--bg-elevated);
+        border-top: 2px solid rgba(99, 102, 241, 0.2);
+        box-shadow: 0 -4px 20px rgba(0,0,0,0.08);
+        display: flex;
+        align-items: stretch;
+        justify-content: space-around;
+        z-index: 100;
+      }
+      .nav-btn {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+        padding: 6px 4px;
+        background: none;
+        border: none;
+        cursor: pointer;
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--text-muted);
+        transition: color 0.2s, background 0.2s;
+      }
+      .nav-btn:hover {
+        color: var(--accent);
+        background: var(--accent-soft);
+      }
+      .nav-btn.active {
+        color: var(--accent);
+        background: var(--accent-soft);
+      }
+      .nav-btn .nav-icon {
+        font-size: 18px;
+        line-height: 1;
+      }
+      .screen-placeholder {
+        padding: 20px 0;
+        text-align: center;
+        color: var(--text-muted);
+        font-size: 14px;
+        line-height: 1.6;
+      }
+      .screen-placeholder h3 {
+        margin: 0 0 8px;
+        font-size: 16px;
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="root">
+      <div class="card" id="main-card">
+        <div class="header">
+          <div class="title-block">
+            <div class="title" id="game-title">City President</div>
+            <div class="subtitle" id="game-subtitle">Экономика города</div>
+          </div>
+          <div class="pill">
+            <div class="pill-dot"></div>
+            Mini App
+          </div>
+        </div>
+
+        <div class="resources" id="resources-bar">
+          <div class="res-pill">
+            <div class="res-label">Деньги</div>
+            <div class="res-value" id="res-money">0</div>
+          </div>
+          <div class="res-pill">
+            <div class="res-label">Население</div>
+            <div class="res-value" id="res-population">0</div>
+          </div>
+          <div class="res-pill">
+            <div class="res-label">Экономика</div>
+            <div class="res-value" id="res-economy">0</div>
+          </div>
+        </div>
+
+        <div id="screen-content">
+          <div class="screen-economy" id="screen-economy">
+            <div class="story">
+              <div class="story-label">Сейчас происходит</div>
+              <div class="story-text" id="story-text"></div>
+            </div>
+            <div class="choices" id="choices"></div>
+            <div class="status-bar">
+              <div class="progress">
+                <div class="progress-fill" id="progress-fill"></div>
+              </div>
+              <div class="meta">
+                <div class="meta-pill" id="meta-node">Ход 1</div>
+                <div class="meta-pill" id="meta-ending"></div>
+              </div>
+            </div>
+          </div>
+          <div class="screen-placeholder" id="screen-placeholder" style="display: none;"></div>
+        </div>
+      </div>
+    </div>
+
+    <nav class="bottom-nav" id="bottom-nav">
+      <button type="button" class="nav-btn" data-tab="rating" aria-label="Рейтинг">
+        <span class="nav-icon">🏆</span>
+        <span>Рейтинг</span>
+      </button>
+      <button type="button" class="nav-btn active" data-tab="economy" aria-label="Экономика">
+        <span class="nav-icon">💰</span>
+        <span>Экономика</span>
+      </button>
+      <button type="button" class="nav-btn" data-tab="city" aria-label="Город">
+        <span class="nav-icon">🏙️</span>
+        <span>Город</span>
+      </button>
+      <button type="button" class="nav-btn" data-tab="citizens" aria-label="Жители">
+        <span class="nav-icon">👥</span>
+        <span>Жители</span>
+      </button>
+      <button type="button" class="nav-btn" data-tab="donat" aria-label="Донат">
+        <span class="nav-icon">❤️</span>
+        <span>Донат</span>
+      </button>
+    </nav>
+
+    <script src="./main.js"></script>
+  </body>
+</html>
+
