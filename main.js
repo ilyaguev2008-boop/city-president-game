@@ -2,49 +2,49 @@ const ECON_START_MONEY = 100000;
 const MAX_HOURS_ACCUMULATE = 168;
 
 const ENTERPRISES = [
-  { id: "ent_1", name: "Ларёк", cost: 2000, population: 0, economy: 1, incomePerHour: 80 },
-  { id: "ent_2", name: "Магазин", cost: 5000, population: 0, economy: 2, incomePerHour: 220 },
-  { id: "ent_3", name: "Кафе", cost: 10000, population: 2, economy: 3, incomePerHour: 450 },
-  { id: "ent_4", name: "АЗС", cost: 18000, population: 0, economy: 4, incomePerHour: 750 },
-  { id: "ent_5", name: "Склад", cost: 28000, population: 0, economy: 5, incomePerHour: 1100 },
-  { id: "ent_6", name: "Прачечная", cost: 40000, population: 3, economy: 6, incomePerHour: 1600 },
-  { id: "ent_7", name: "Пекарня", cost: 55000, population: 5, economy: 7, incomePerHour: 2200 },
-  { id: "ent_8", name: "Автосервис", cost: 75000, population: 8, economy: 9, incomePerHour: 3000 },
-  { id: "ent_9", name: "Супермаркет", cost: 100000, population: 10, economy: 11, incomePerHour: 4000 },
-  { id: "ent_10", name: "Завод", cost: 130000, population: 0, economy: 14, incomePerHour: 5200 },
-  { id: "ent_11", name: "ТЦ", cost: 170000, population: 15, economy: 17, incomePerHour: 6800 },
-  { id: "ent_12", name: "Логистический центр", cost: 220000, population: 0, economy: 20, incomePerHour: 8800 },
-  { id: "ent_13", name: "Отель", cost: 280000, population: 20, economy: 24, incomePerHour: 11200 },
-  { id: "ent_14", name: "Фабрика", cost: 350000, population: 0, economy: 28, incomePerHour: 14000 },
-  { id: "ent_15", name: "Бизнес-центр", cost: 430000, population: 25, economy: 33, incomePerHour: 17200 },
-  { id: "ent_16", name: "IT-компания", cost: 520000, population: 30, economy: 38, incomePerHour: 20800 },
-  { id: "ent_17", name: "Недра", cost: 620000, population: 0, economy: 44, incomePerHour: 24800 },
-  { id: "ent_18", name: "Медиа-холдинг", cost: 750000, population: 40, economy: 50, incomePerHour: 30000 },
-  { id: "ent_19", name: "IT-парк", cost: 900000, population: 50, economy: 58, incomePerHour: 36000 },
-  { id: "ent_20", name: "Корпорация", cost: 1100000, population: 60, economy: 70, incomePerHour: 44000 },
+  { id: "ent_1", name: "Ларёк", icon: "🏪", cost: 2000, population: 0, economy: 1, incomePerHour: 80 },
+  { id: "ent_2", name: "Магазин", icon: "🛒", cost: 5000, population: 0, economy: 2, incomePerHour: 220 },
+  { id: "ent_3", name: "Кафе", icon: "☕", cost: 10000, population: 2, economy: 3, incomePerHour: 450 },
+  { id: "ent_4", name: "АЗС", icon: "⛽", cost: 18000, population: 0, economy: 4, incomePerHour: 750 },
+  { id: "ent_5", name: "Склад", icon: "📦", cost: 28000, population: 0, economy: 5, incomePerHour: 1100 },
+  { id: "ent_6", name: "Прачечная", icon: "🧺", cost: 40000, population: 3, economy: 6, incomePerHour: 1600 },
+  { id: "ent_7", name: "Пекарня", icon: "🥖", cost: 55000, population: 5, economy: 7, incomePerHour: 2200 },
+  { id: "ent_8", name: "Автосервис", icon: "🔧", cost: 75000, population: 8, economy: 9, incomePerHour: 3000 },
+  { id: "ent_9", name: "Супермаркет", icon: "🏬", cost: 100000, population: 10, economy: 11, incomePerHour: 4000 },
+  { id: "ent_10", name: "Завод", icon: "🏭", cost: 130000, population: 0, economy: 14, incomePerHour: 5200 },
+  { id: "ent_11", name: "ТЦ", icon: "🛍️", cost: 170000, population: 15, economy: 17, incomePerHour: 6800 },
+  { id: "ent_12", name: "Логистический центр", icon: "🚚", cost: 220000, population: 0, economy: 20, incomePerHour: 8800 },
+  { id: "ent_13", name: "Отель", icon: "🏨", cost: 280000, population: 20, economy: 24, incomePerHour: 11200 },
+  { id: "ent_14", name: "Фабрика", icon: "🏗️", cost: 350000, population: 0, economy: 28, incomePerHour: 14000 },
+  { id: "ent_15", name: "Бизнес-центр", icon: "🏢", cost: 430000, population: 25, economy: 33, incomePerHour: 17200 },
+  { id: "ent_16", name: "IT-компания", icon: "💻", cost: 520000, population: 30, economy: 38, incomePerHour: 20800 },
+  { id: "ent_17", name: "Недра", icon: "⛏️", cost: 620000, population: 0, economy: 44, incomePerHour: 24800 },
+  { id: "ent_18", name: "Медиа-холдинг", icon: "📡", cost: 750000, population: 40, economy: 50, incomePerHour: 30000 },
+  { id: "ent_19", name: "IT-парк", icon: "🌐", cost: 900000, population: 50, economy: 58, incomePerHour: 36000 },
+  { id: "ent_20", name: "Корпорация", icon: "🏛️", cost: 1100000, population: 60, economy: 70, incomePerHour: 44000 },
 ];
 
 const RESIDENCES = [
-  { id: "res_1", name: "Сарай", cost: 1500, population: 3, economy: 0, incomePerHour: 30 },
-  { id: "res_2", name: "Домик", cost: 4000, population: 8, economy: 0, incomePerHour: 100 },
-  { id: "res_3", name: "Малый дом", cost: 8000, population: 15, economy: 1, incomePerHour: 200 },
-  { id: "res_4", name: "Квартирный дом", cost: 15000, population: 28, economy: 2, incomePerHour: 380 },
-  { id: "res_5", name: "Жилой блок", cost: 25000, population: 45, economy: 3, incomePerHour: 600 },
-  { id: "res_6", name: "Микрорайон", cost: 40000, population: 70, economy: 5, incomePerHour: 950 },
-  { id: "res_7", name: "Жилой комплекс", cost: 60000, population: 100, economy: 7, incomePerHour: 1400 },
-  { id: "res_8", name: "Таунхаусы", cost: 90000, population: 140, economy: 9, incomePerHour: 2000 },
-  { id: "res_9", name: "ЖК «Комфорт»", cost: 130000, population: 190, economy: 12, incomePerHour: 2700 },
-  { id: "res_10", name: "Высотка", cost: 180000, population: 250, economy: 15, incomePerHour: 3600 },
-  { id: "res_11", name: "ЖК «Бизнес»", cost: 240000, population: 320, economy: 19, incomePerHour: 4700 },
-  { id: "res_12", name: "Элитный квартал", cost: 320000, population: 400, economy: 24, incomePerHour: 6200 },
-  { id: "res_13", name: "Жилой район", cost: 420000, population: 500, economy: 30, incomePerHour: 8000 },
-  { id: "res_14", name: "Мега-ЖК", cost: 540000, population: 620, economy: 36, incomePerHour: 10200 },
-  { id: "res_15", name: "Городок", cost: 700000, population: 760, economy: 44, incomePerHour: 12800 },
-  { id: "res_16", name: "Агломерация", cost: 900000, population: 920, economy: 52, incomePerHour: 16000 },
-  { id: "res_17", name: "Спутник города", cost: 1150000, population: 1100, economy: 62, incomePerHour: 19800 },
-  { id: "res_18", name: "Новый город", cost: 1450000, population: 1320, economy: 73, incomePerHour: 24500 },
-  { id: "res_19", name: "Мегаполис", cost: 1800000, population: 1580, economy: 86, incomePerHour: 30200 },
-  { id: "res_20", name: "Столица", cost: 2200000, population: 1900, economy: 100, incomePerHour: 38000 },
+  { id: "res_1", name: "Сарай", icon: "🛖", cost: 1500, population: 3, economy: 0, incomePerHour: 30 },
+  { id: "res_2", name: "Домик", icon: "🏠", cost: 4000, population: 8, economy: 0, incomePerHour: 100 },
+  { id: "res_3", name: "Малый дом", icon: "🏡", cost: 8000, population: 15, economy: 1, incomePerHour: 200 },
+  { id: "res_4", name: "Квартирный дом", icon: "🏘️", cost: 15000, population: 28, economy: 2, incomePerHour: 380 },
+  { id: "res_5", name: "Жилой блок", icon: "🏢", cost: 25000, population: 45, economy: 3, incomePerHour: 600 },
+  { id: "res_6", name: "Микрорайон", icon: "🏙️", cost: 40000, population: 70, economy: 5, incomePerHour: 950 },
+  { id: "res_7", name: "Жилой комплекс", icon: "🏗️", cost: 60000, population: 100, economy: 7, incomePerHour: 1400 },
+  { id: "res_8", name: "Таунхаусы", icon: "🏘️", cost: 90000, population: 140, economy: 9, incomePerHour: 2000 },
+  { id: "res_9", name: "ЖК «Комфорт»", icon: "✨", cost: 130000, population: 190, economy: 12, incomePerHour: 2700 },
+  { id: "res_10", name: "Высотка", icon: "🌆", cost: 180000, population: 250, economy: 15, incomePerHour: 3600 },
+  { id: "res_11", name: "ЖК «Бизнес»", icon: "💼", cost: 240000, population: 320, economy: 19, incomePerHour: 4700 },
+  { id: "res_12", name: "Элитный квартал", icon: "👑", cost: 320000, population: 400, economy: 24, incomePerHour: 6200 },
+  { id: "res_13", name: "Жилой район", icon: "🏘️", cost: 420000, population: 500, economy: 30, incomePerHour: 8000 },
+  { id: "res_14", name: "Мега-ЖК", icon: "🌃", cost: 540000, population: 620, economy: 36, incomePerHour: 10200 },
+  { id: "res_15", name: "Городок", icon: "🏛️", cost: 700000, population: 760, economy: 44, incomePerHour: 12800 },
+  { id: "res_16", name: "Агломерация", icon: "🌉", cost: 900000, population: 920, economy: 52, incomePerHour: 16000 },
+  { id: "res_17", name: "Спутник города", icon: "🛸", cost: 1150000, population: 1100, economy: 62, incomePerHour: 19800 },
+  { id: "res_18", name: "Новый город", icon: "🏗️", cost: 1450000, population: 1320, economy: 73, incomePerHour: 24500 },
+  { id: "res_19", name: "Мегаполис", icon: "🌇", cost: 1800000, population: 1580, economy: 86, incomePerHour: 30200 },
+  { id: "res_20", name: "Столица", icon: "🏰", cost: 2200000, population: 1900, economy: 100, incomePerHour: 38000 },
 ];
 
 const ALL_BUILDINGS = [...ENTERPRISES, ...RESIDENCES];
@@ -170,20 +170,24 @@ function renderCity() {
   const energyPct = state.maxEnergy > 0 ? (state.energy / state.maxEnergy) * 100 : 0;
   el.screenPlaceholder.innerHTML = `
     <div class="city-circle-wrap">
-      <p style="margin:0;font-size:13px;color:var(--text-muted);">Нажми на кружок — получишь <b>${fmtMoney(state.clickIncome)} ₽</b>. Тратится 1 энергия.</p>
-      <div class="city-circle ${state.energy <= 0 ? "disabled" : ""}" id="city-circle" role="button" tabindex="0">
-        💰<br><span style="font-size:14px;">Клик</span>
-      </div>
-      <div class="energy-bar-wrap">
-        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-bottom:4px;">
-          <span>Энергия</span>
-          <span id="city-energy-text">${state.energy} / ${state.maxEnergy}</span>
+      <div class="city-bg" aria-hidden="true"></div>
+      <div class="city-bg-overlay" aria-hidden="true"></div>
+      <div class="city-content">
+        <p style="margin:0;font-size:13px;">Нажми на кружок — получишь <b>${fmtMoney(state.clickIncome)} ₽</b>. Тратится 1 энергия.</p>
+        <div class="city-circle ${state.energy <= 0 ? "disabled" : ""}" id="city-circle" role="button" tabindex="0">
+          💰<br><span style="font-size:14px;">Клик</span>
         </div>
-        <div class="energy-bar">
-          <div class="energy-fill" id="city-energy-fill" style="width:${energyPct}%"></div>
+        <div class="energy-bar-wrap">
+          <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px;">
+            <span>Энергия</span>
+            <span id="city-energy-text">${state.energy} / ${state.maxEnergy}</span>
+          </div>
+          <div class="energy-bar">
+            <div class="energy-fill" id="city-energy-fill" style="width:${energyPct}%"></div>
+          </div>
         </div>
+        <p style="margin:0;font-size:11px;">Восстановление: ${state.energyPerHour} ед/час</p>
       </div>
-      <p style="margin:0;font-size:11px;color:var(--text-muted);">Восстановление: ${state.energyPerHour} ед/час</p>
     </div>
   `;
   const circle = document.getElementById("city-circle");
@@ -341,13 +345,17 @@ function renderEconomy() {
       const count = state.buildings[b.id] || 0;
       const affordable = state.money >= b.cost;
       btn.className = "choice-btn" + (index === 0 ? " primary" : "") + (affordable ? "" : " disabled");
-      const labelSpan = document.createElement("span");
-      labelSpan.textContent = `${b.name} — ${fmtMoney(b.cost)} ₽ (x${count})`;
-      btn.appendChild(labelSpan);
-      const hk = document.createElement("span");
-      hk.className = "choice-hotkey";
-      hk.textContent = `📈 +${b.economy} 💰 ${fmtMoney(b.incomePerHour)}/час`;
-      btn.appendChild(hk);
+      const row = document.createElement("div");
+      row.className = "building-row";
+      const icon = document.createElement("div");
+      icon.className = "building-icon";
+      icon.textContent = b.icon || "🏪";
+      const info = document.createElement("div");
+      info.className = "building-info";
+      info.innerHTML = `<span class="building-name">${b.name} · ${fmtMoney(b.cost)} ₽</span><span class="building-stats">x${count} · 📈 +${b.economy} · 💰 ${fmtMoney(b.incomePerHour)}/час</span>`;
+      row.appendChild(icon);
+      row.appendChild(info);
+      btn.appendChild(row);
       btn.addEventListener("click", () => buyBuilding(b));
       el.choices.appendChild(btn);
     });
@@ -357,13 +365,17 @@ function renderEconomy() {
       const count = state.buildings[b.id] || 0;
       const affordable = state.money >= b.cost;
       btn.className = "choice-btn" + (index === 0 ? " primary" : "") + (affordable ? "" : " disabled");
-      const labelSpan = document.createElement("span");
-      labelSpan.textContent = `${b.name} — ${fmtMoney(b.cost)} ₽ (x${count})`;
-      btn.appendChild(labelSpan);
-      const hk = document.createElement("span");
-      hk.className = "choice-hotkey";
-      hk.textContent = `👥 +${b.population} 💰 ${fmtMoney(b.incomePerHour)}/час`;
-      btn.appendChild(hk);
+      const row = document.createElement("div");
+      row.className = "building-row";
+      const icon = document.createElement("div");
+      icon.className = "building-icon";
+      icon.textContent = b.icon || "🏠";
+      const info = document.createElement("div");
+      info.className = "building-info";
+      info.innerHTML = `<span class="building-name">${b.name} · ${fmtMoney(b.cost)} ₽</span><span class="building-stats">x${count} · 👥 +${b.population} · 💰 ${fmtMoney(b.incomePerHour)}/час</span>`;
+      row.appendChild(icon);
+      row.appendChild(info);
+      btn.appendChild(row);
       btn.addEventListener("click", () => buyBuilding(b));
       el.choices.appendChild(btn);
     });
