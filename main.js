@@ -1,4 +1,4 @@
-const ECON_START_MONEY = 100000;
+    const ECON_START_MONEY = 100000;
 
 const BUILDINGS = [
   {
@@ -62,9 +62,52 @@ const el = {
   resMoney: document.getElementById("res-money"),
   resPopulation: document.getElementById("res-population"),
   resEconomy: document.getElementById("res-economy"),
+  screenEconomy: document.getElementById("screen-economy"),
+  screenPlaceholder: document.getElementById("screen-placeholder"),
 };
 
 let state = { ...initialState };
+let currentTab = "economy";
+
+const TAB_TITLES = {
+  rating: { title: "Рейтинг", subtitle: "Топ президентов" },
+  economy: { title: "Экономика", subtitle: "Застройка и доход" },
+  city: { title: "Город", subtitle: "Обзор города" },
+  citizens: { title: "Жители", subtitle: "Население" },
+  donat: { title: "Донат", subtitle: "Поддержать игру" },
+};
+
+function setActiveTab(tab) {
+  currentTab = tab;
+  el.title.textContent = "City President";
+  el.subtitle.textContent = TAB_TITLES[tab] ? TAB_TITLES[tab].subtitle : tab;
+  document.querySelectorAll(".nav-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.tab === tab);
+  });
+  if (tab === "economy") {
+    el.screenEconomy.style.display = "";
+    el.screenPlaceholder.style.display = "none";
+    renderEconomy();
+  } else {
+    el.screenEconomy.style.display = "none";
+    el.screenPlaceholder.style.display = "block";
+    renderPlaceholder(tab);
+  }
+}
+
+function renderPlaceholder(tab) {
+  const texts = {
+    rating:
+      "<h3>🏆 Рейтинг</h3>Скоро здесь появится таблица лидеров. Копи деньги, население и экономику — и попади в топ!",
+    city:
+      "<h3>🏙️ Город</h3>Здесь будет обзор твоего города: карта, построенные здания и статистика по районам.",
+    citizens:
+      "<h3>👥 Жители</h3>Информация о населении: рост, занятость и настроение жителей. Развивай город — привлечёшь больше людей.",
+    donat:
+      "<h3>❤️ Донат</h3>Поддержать разработчика и получить бонусы в игре можно будет здесь. Функция скоро появится!",
+  };
+  el.screenPlaceholder.innerHTML = texts[tab] || "<p>Раздел в разработке.</p>";
+}
 
 function fmtMoney(v) {
   return v.toLocaleString("ru-RU", { maximumFractionDigits: 0 });
@@ -214,5 +257,13 @@ function initTelegram() {
 document.addEventListener("DOMContentLoaded", () => {
   initTelegram();
   restoreProgress();
+  setActiveTab("economy");
+
+  document.getElementById("bottom-nav").addEventListener("click", (e) => {
+    const btn = e.target.closest(".nav-btn");
+    if (btn && btn.dataset.tab) {
+      setActiveTab(btn.dataset.tab);
+    }
+  });
 });
 
