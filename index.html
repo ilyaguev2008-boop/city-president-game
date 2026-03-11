@@ -74,6 +74,7 @@
         display: flex;
         flex-direction: column;
         background: transparent;
+        overflow: hidden;
       }
       body.city-tab #screen-placeholder .city-circle-wrap {
         flex: 1;
@@ -97,14 +98,15 @@
         pointer-events: none;
       }
       body.city-tab #screen-placeholder .city-content .city-circle {
-        position: fixed;
-        left: 50%;
-        top: calc((100vh - var(--nav-height)) / 2);
-        transform: translate(-50%, -50%);
+        position: fixed !important;
+        left: 50% !important;
+        top: calc((100vh - var(--nav-height)) / 2) !important;
+        transform: translate(-50%, -50%) !important;
         pointer-events: auto;
+        margin: 0;
       }
       body.city-tab #screen-placeholder .city-content .city-circle:active:not(.disabled) {
-        transform: translate(-50%, -50%) scale(0.96);
+        transform: translate(-50%, -50%) scale(0.96) !important;
       }
       body.city-tab #screen-placeholder .city-content .energy-bar-wrap,
       body.city-tab #screen-placeholder .city-content .city-hint {
