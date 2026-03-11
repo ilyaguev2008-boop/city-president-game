@@ -49,6 +49,12 @@ const RESIDENCES = [
 
 const ALL_BUILDINGS = [...ENTERPRISES, ...RESIDENCES];
 
+/** URL картинки для объекта: локальные сгенерированные или плейсхолдер по id */
+function getBuildingImageUrl(b) {
+  const base = "./images/buildings";
+  return `${base}/${b.id}.png`;
+}
+
 const BONUS_UPGRADES = {
   click: {
     name: "Доход за клик",
@@ -342,44 +348,84 @@ function renderEconomy() {
   el.choices.appendChild(subNav);
 
   if (currentEconomySection === "enterprises") {
-    ENTERPRISES.forEach((b, index) => {
-      const btn = document.createElement("button");
+    ENTERPRISES.forEach((b) => {
       const count = state.buildings[b.id] || 0;
       const affordable = state.money >= b.cost;
-      btn.className = "choice-btn" + (index === 0 ? " primary" : "") + (affordable ? "" : " disabled");
-      const row = document.createElement("div");
-      row.className = "building-row";
-      const icon = document.createElement("div");
-      icon.className = "building-icon";
-      icon.textContent = b.icon || "🏪";
-      const info = document.createElement("div");
-      info.className = "building-info";
-      info.innerHTML = `<span class="building-name">${b.name} · ${fmtMoney(b.cost)} ₽</span><span class="building-stats">x${count} · 📈 +${b.economy} · 💰 ${fmtMoney(b.incomePerHour)}/час</span>`;
-      row.appendChild(icon);
-      row.appendChild(info);
-      btn.appendChild(row);
-      btn.addEventListener("click", () => buyBuilding(b));
-      el.choices.appendChild(btn);
+      const card = document.createElement("div");
+      card.className = "purchase-card" + (affordable ? "" : " disabled");
+      const imgWrap = document.createElement("div");
+      imgWrap.className = "purchase-card-image-wrap";
+      const img = document.createElement("img");
+      img.className = "purchase-card-image";
+      img.src = getBuildingImageUrl(b);
+      img.alt = b.name;
+      img.loading = "lazy";
+      img.onerror = () => imgWrap.classList.add("failed");
+      const imgFallback = document.createElement("span");
+      imgFallback.className = "img-fallback";
+      imgFallback.textContent = b.icon || "🏪";
+      imgWrap.appendChild(img);
+      imgWrap.appendChild(imgFallback);
+      const body = document.createElement("div");
+      body.className = "purchase-card-body";
+      body.innerHTML = `
+        <span class="purchase-card-name">${b.name}</span>
+        <span class="purchase-card-stats">x${count} · 📈 +${b.economy} · 💰 ${fmtMoney(b.incomePerHour)}/час</span>
+        <span class="purchase-card-price">${fmtMoney(b.cost)} ₽</span>
+      `;
+      const action = document.createElement("div");
+      action.className = "purchase-card-action";
+      const buyBtn = document.createElement("button");
+      buyBtn.type = "button";
+      buyBtn.className = "buy-btn";
+      buyBtn.textContent = "Купить";
+      buyBtn.addEventListener("click", (e) => { e.stopPropagation(); if (affordable) buyBuilding(b); });
+      action.appendChild(buyBtn);
+      card.appendChild(imgWrap);
+      card.appendChild(body);
+      card.appendChild(action);
+      card.addEventListener("click", (e) => { if (!e.target.closest(".buy-btn") && affordable) buyBuilding(b); });
+      el.choices.appendChild(card);
     });
   } else if (currentEconomySection === "residences") {
-    RESIDENCES.forEach((b, index) => {
-      const btn = document.createElement("button");
+    RESIDENCES.forEach((b) => {
       const count = state.buildings[b.id] || 0;
       const affordable = state.money >= b.cost;
-      btn.className = "choice-btn" + (index === 0 ? " primary" : "") + (affordable ? "" : " disabled");
-      const row = document.createElement("div");
-      row.className = "building-row";
-      const icon = document.createElement("div");
-      icon.className = "building-icon";
-      icon.textContent = b.icon || "🏠";
-      const info = document.createElement("div");
-      info.className = "building-info";
-      info.innerHTML = `<span class="building-name">${b.name} · ${fmtMoney(b.cost)} ₽</span><span class="building-stats">x${count} · 👥 +${b.population} · 💰 ${fmtMoney(b.incomePerHour)}/час</span>`;
-      row.appendChild(icon);
-      row.appendChild(info);
-      btn.appendChild(row);
-      btn.addEventListener("click", () => buyBuilding(b));
-      el.choices.appendChild(btn);
+      const card = document.createElement("div");
+      card.className = "purchase-card" + (affordable ? "" : " disabled");
+      const imgWrap = document.createElement("div");
+      imgWrap.className = "purchase-card-image-wrap";
+      const img = document.createElement("img");
+      img.className = "purchase-card-image";
+      img.src = getBuildingImageUrl(b);
+      img.alt = b.name;
+      img.loading = "lazy";
+      img.onerror = () => imgWrap.classList.add("failed");
+      const imgFallback = document.createElement("span");
+      imgFallback.className = "img-fallback";
+      imgFallback.textContent = b.icon || "🏠";
+      imgWrap.appendChild(img);
+      imgWrap.appendChild(imgFallback);
+      const body = document.createElement("div");
+      body.className = "purchase-card-body";
+      body.innerHTML = `
+        <span class="purchase-card-name">${b.name}</span>
+        <span class="purchase-card-stats">x${count} · 👥 +${b.population} · 💰 ${fmtMoney(b.incomePerHour)}/час</span>
+        <span class="purchase-card-price">${fmtMoney(b.cost)} ₽</span>
+      `;
+      const action = document.createElement("div");
+      action.className = "purchase-card-action";
+      const buyBtn = document.createElement("button");
+      buyBtn.type = "button";
+      buyBtn.className = "buy-btn";
+      buyBtn.textContent = "Купить";
+      buyBtn.addEventListener("click", (e) => { e.stopPropagation(); if (affordable) buyBuilding(b); });
+      action.appendChild(buyBtn);
+      card.appendChild(imgWrap);
+      card.appendChild(body);
+      card.appendChild(action);
+      card.addEventListener("click", (e) => { if (!e.target.closest(".buy-btn") && affordable) buyBuilding(b); });
+      el.choices.appendChild(card);
     });
   } else {
     Object.entries(BONUS_UPGRADES).forEach(([id, u]) => {
