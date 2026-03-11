@@ -94,19 +94,32 @@
       body.city-tab #screen-placeholder .city-content {
         position: absolute;
         inset: 0;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 24px;
-        padding: 16px;
+        pointer-events: none;
       }
+      body.city-tab #screen-placeholder .city-content .city-circle {
+        position: fixed;
+        left: 50%;
+        top: calc((100vh - var(--nav-height)) / 2);
+        transform: translate(-50%, -50%);
+        pointer-events: auto;
+      }
+      body.city-tab #screen-placeholder .city-content .city-circle:active:not(.disabled) {
+        transform: translate(-50%, -50%) scale(0.96);
+      }
+      body.city-tab #screen-placeholder .city-content .energy-bar-wrap,
       body.city-tab #screen-placeholder .city-content .city-hint {
-        order: 3;
-        margin-top: 8px;
+        position: absolute;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(var(--nav-height) + 24px);
+        pointer-events: auto;
       }
       body.city-tab #screen-placeholder .city-content .energy-bar-wrap {
-        order: 2;
+        bottom: calc(var(--nav-height) + 56px);
+      }
+      body.city-tab #screen-placeholder .city-content .city-hint {
+        bottom: calc(var(--nav-height) + 16px);
+        margin-top: 0;
       }
       .root {
         min-height: 100vh;
