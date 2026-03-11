@@ -500,6 +500,84 @@
         background: var(--bg-elevated);
         margin-bottom: 12px;
       }
+      /* Вытянутые карточки покупок: картинка слева, инфо по центру, кнопка справа */
+      .purchase-card {
+        display: flex;
+        align-items: stretch;
+        width: 100%;
+        min-height: 88px;
+        border-radius: 14px;
+        border: 1px solid var(--border);
+        background: var(--bg-elevated);
+        overflow: hidden;
+        margin-bottom: 10px;
+        transition: border-color 0.2s, background 0.2s;
+      }
+      .purchase-card:hover { border-color: rgba(255,255,255,0.15); background: #1f1f1f; }
+      .purchase-card.disabled { opacity: 0.7; }
+      .purchase-card.disabled:hover { border-color: var(--border); background: var(--bg-elevated); }
+      .purchase-card-image-wrap {
+        width: 110px;
+        min-width: 110px;
+        height: 88px;
+        background: var(--bg-card);
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .purchase-card-image {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      .purchase-card-image-wrap .img-fallback {
+        display: none;
+        font-size: 36px;
+        line-height: 1;
+      }
+      .purchase-card-image-wrap.failed .purchase-card-image { display: none; }
+      .purchase-card-image-wrap.failed .img-fallback { display: block; }
+      .purchase-card-body {
+        flex: 1;
+        min-width: 0;
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 4px;
+      }
+      .purchase-card-name { font-weight: 600; font-size: 14px; color: var(--text-main); }
+      .purchase-card-stats { font-size: 11px; color: var(--text-muted); }
+      .purchase-card-price { font-size: 13px; font-weight: 700; color: var(--accent); margin-top: 2px; }
+      .purchase-card-action {
+        display: flex;
+        align-items: center;
+        padding: 10px 14px;
+        flex-shrink: 0;
+      }
+      .purchase-card .buy-btn {
+        padding: 10px 16px;
+        border-radius: 12px;
+        border: none;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: transform 0.15s, filter 0.2s;
+        white-space: nowrap;
+      }
+      .purchase-card .buy-btn:active { transform: scale(0.97); }
+      .purchase-card:not(.disabled) .buy-btn {
+        background: var(--accent);
+        color: #0c0c0c;
+      }
+      .purchase-card:not(.disabled) .buy-btn:hover { filter: brightness(1.1); }
+      .purchase-card.disabled .buy-btn {
+        background: var(--bg-card);
+        color: var(--text-muted);
+        cursor: not-allowed;
+      }
       .building-row {
         display: flex;
         align-items: center;
