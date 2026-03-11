@@ -116,7 +116,7 @@ const el = {
 };
 
 let state = { ...initialState };
-let currentTab = "economy";
+let currentTab = "city";
 let currentEconomySection = "enterprises";
 
 const TAB_TITLES = {
@@ -463,7 +463,7 @@ function initTelegram() {
 document.addEventListener("DOMContentLoaded", () => {
   initTelegram();
   restoreProgress();
-  setActiveTab("economy");
+  setActiveTab("city");
 
   document.getElementById("bottom-nav").addEventListener("click", (e) => {
     const btn = e.target.closest(".nav-btn");

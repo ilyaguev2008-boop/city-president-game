@@ -48,11 +48,24 @@
       }
       body.city-tab .header,
       body.city-tab .resources {
-        background: rgba(12,12,12,0.92);
+        background: rgba(12,12,12,0.95);
         margin: 0 -18px;
-        padding: 12px 18px;
+        padding: 10px 14px 10px 18px;
         border-radius: 0;
+        gap: 8px;
       }
+      body.city-tab .header {
+        flex-wrap: wrap;
+      }
+      body.city-tab .title { font-size: 18px; }
+      body.city-tab .subtitle { font-size: 12px; }
+      body.city-tab .res-pill {
+        flex: 1 1 auto;
+        min-width: 60px;
+        padding: 6px 10px;
+      }
+      body.city-tab .res-value { font-size: 13px; }
+      body.city-tab .res-label { font-size: 9px; }
       body.city-tab .title,
       body.city-tab .res-value,
       body.city-tab .pill { color: var(--text-main); }
@@ -512,13 +525,13 @@
       .bonus-card p { margin: 0; font-size: 12px; color: var(--text-muted); }
     </style>
   </head>
-  <body>
+  <body class="city-tab">
     <div class="root">
       <div class="card" id="main-card">
         <div class="header">
           <div class="title-block">
             <div class="title" id="game-title">City President</div>
-            <div class="subtitle" id="game-subtitle">Экономика города</div>
+            <div class="subtitle" id="game-subtitle">Клик — заработать</div>
           </div>
           <div class="pill">
             <div class="pill-dot"></div>
@@ -546,7 +559,7 @@
         </div>
 
         <div id="screen-content">
-          <div class="screen-economy" id="screen-economy">
+          <div class="screen-economy" id="screen-economy" style="display: none;">
             <div class="story">
               <div class="story-label">Сейчас происходит</div>
               <div class="story-text" id="story-text"></div>
@@ -562,23 +575,23 @@
               </div>
             </div>
           </div>
-          <div class="screen-placeholder" id="screen-placeholder" style="display: none;"></div>
+          <div class="screen-placeholder" id="screen-placeholder"></div>
         </div>
       </div>
     </div>
 
     <nav class="bottom-nav" id="bottom-nav">
+      <button type="button" class="nav-btn active" data-tab="city" aria-label="Город">
+        <span class="nav-icon">🏙️</span>
+        <span>Город</span>
+      </button>
+      <button type="button" class="nav-btn" data-tab="economy" aria-label="Экономика">
+        <span class="nav-icon">🏢</span>
+        <span>Экономика</span>
+      </button>
       <button type="button" class="nav-btn" data-tab="rating" aria-label="Рейтинг">
         <span class="nav-icon">🏆</span>
         <span>Рейтинг</span>
-      </button>
-      <button type="button" class="nav-btn active" data-tab="economy" aria-label="Экономика">
-        <span class="nav-icon">💰</span>
-        <span>Экономика</span>
-      </button>
-      <button type="button" class="nav-btn" data-tab="city" aria-label="Город">
-        <span class="nav-icon">🏙️</span>
-        <span>Город</span>
       </button>
       <button type="button" class="nav-btn" data-tab="citizens" aria-label="Жители">
         <span class="nav-icon">👥</span>
