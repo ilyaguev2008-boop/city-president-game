@@ -220,6 +220,8 @@ async def main() -> None:
     dp.callback_query.register(menu_router, F.data.startswith("menu:"))
     dp.message.register(ai_reply, F.text & ~F.text.startswith("/"))
 
+    # Иначе Telegram отдаёт Conflict, если у бота остался webhook или второй процесс polling.
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
