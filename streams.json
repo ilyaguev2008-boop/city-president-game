@@ -1,0 +1,38 @@
+[
+  {
+    "title": "Матч 1",
+    "url": ""
+  },
+  {
+    "title": "Матч 2",
+    "url": ""
+  },
+  {
+    "title": "Матч 3",
+    "url": ""
+  },
+  {
+    "title": "Матч 4",
+    "url": ""
+  }
+]
+{
+  "streams": [
+    {
+      "title": "Матч 1",
+      "url": "https://okko.sport/sport/live_event/fc-midtjylland-nottingham-forest-uefaeuropaleague-round-of-16-2nd-leg-25-26?playing=live&id=7ed64093-35fb-3e89-82b5-381d4a818197&type=LIVE_EVENT"
+    },
+    {
+      "title": "Матч 2",
+      "url": "https://okko.sport/sport/live_event/fc-midtjylland-nottingham-forest-uefaeuropaleague-round-of-16-2nd-leg-25-26?playing=live&id=7ed64093-35fb-3e89-82b5-381d4a818197&type=LIVE_EVENT"
+    },
+    {
+      "title": "Матч 3",
+      "url": "https://okko.sport/sport/live_event/fc-midtjylland-nottingham-forest-uefaeuropaleague-round-of-16-2nd-leg-25-26?playing=live&id=7ed64093-35fb-3e89-82b5-381d4a818197&type=LIVE_EVENT"
+    },
+    {
+      "title": "Матч 4",
+      "url": "https://okko.sport/sport/live_event/fc-midtjylland-nottingham-forest-uefaeuropaleague-round-of-16-2nd-leg-25-26?playing=live&id=7ed64093-35fb-3e89-82b5-381d4a818197&type=LIVE_EVENT"
+    }
+  ]
+}

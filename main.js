@@ -1,21 +1,28 @@
-const STREAMS = [
-  {
-    title: "Матч 1",
-    url: "https://okko.sport/sport/live_event/fc-midtjylland-nottingham-forest-uefaeuropaleague-round-of-16-2nd-leg-25-26?playing=live&id=7ed64093-35fb-3e89-82b5-381d4a818197&type=LIVE_EVENT",
-  },
-  {
-    title: "Матч 2",
-    url: "https://okko.sport/sport/live_event/fc-midtjylland-nottingham-forest-uefaeuropaleague-round-of-16-2nd-leg-25-26?playing=live&id=7ed64093-35fb-3e89-82b5-381d4a818197&type=LIVE_EVENT",
-  },
-  {
-    title: "Матч 3",
-    url: "https://okko.sport/sport/live_event/fc-midtjylland-nottingham-forest-uefaeuropaleague-round-of-16-2nd-leg-25-26?playing=live&id=7ed64093-35fb-3e89-82b5-381d4a818197&type=LIVE_EVENT",
-  },
-  {
-    title: "Матч 4",
-    url: "https://okko.sport/sport/live_event/fc-midtjylland-nottingham-forest-uefaeuropaleague-round-of-16-2nd-leg-25-26?playing=live&id=7ed64093-35fb-3e89-82b5-381d4a818197&type=LIVE_EVENT",
-  },
+const FALLBACK_STREAMS = [
+  { title: "Матч 1", url: "" },
+  { title: "Матч 2", url: "" },
+  { title: "Матч 3", url: "" },
+  { title: "Матч 4", url: "" },
 ];
+
+async function loadStreams() {
+  try {
+    const response = await fetch("./streams.json", { cache: "no-store" });
+    if (!response.ok) return FALLBACK_STREAMS;
+    const data = await response.json();
+    if (!Array.isArray(data)) return FALLBACK_STREAMS;
+    return FALLBACK_STREAMS.map((fallback, index) => {
+      const item = data[index];
+      if (!item || typeof item !== "object") return fallback;
+      return {
+        title: typeof item.title === "string" ? item.title : fallback.title,
+        url: typeof item.url === "string" ? item.url : "",
+      };
+    });
+  } catch {
+    return FALLBACK_STREAMS;
+  }
+}
 
 function initTelegram() {
   if (!window.Telegram || !window.Telegram.WebApp) return;
@@ -24,13 +31,13 @@ function initTelegram() {
   tg.expand();
 }
 
-function renderStreams() {
+function renderStreams(streams) {
   const grid = document.getElementById("streams-grid");
   if (!grid) return;
 
   grid.innerHTML = "";
 
-  STREAMS.forEach((stream, idx) => {
+  streams.forEach((stream, idx) => {
     const card = document.createElement("section");
     card.className = "stream-card";
 
@@ -42,21 +49,22 @@ function renderStreams() {
     wrap.className = "frame-wrap";
 
     const frame = document.createElement("iframe");
-    frame.src = stream.url;
-    frame.allow =
-      "autoplay; fullscreen; picture-in-picture; encrypted-media";
-    frame.referrerPolicy = "origin";
-    frame.loading = "lazy";
-
     const error = document.createElement("div");
     error.className = "error";
-    error.textContent =
-      "Источник не дал показать видео в iframe. Нужен embed или прямой поток.";
-
-    // Показываем подсказку, если загрузка iframe явно не удалась.
-    frame.addEventListener("error", () => {
+    if (!stream.url) {
       card.classList.add("blocked");
-    });
+      error.textContent = "Ссылка для этого окна пока не задана.";
+    } else {
+      frame.src = stream.url;
+      frame.allow =
+        "autoplay; fullscreen; picture-in-picture; encrypted-media";
+      frame.referrerPolicy = "origin";
+      frame.loading = "lazy";
+      // Показываем подсказку, если загрузка iframe явно не удалась.
+      frame.addEventListener("error", () => {
+        card.classList.add("blocked");
+      });
+    }
 
     wrap.appendChild(frame);
     wrap.appendChild(error);
@@ -66,7 +74,8 @@ function renderStreams() {
   });
 }
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   initTelegram();
-  renderStreams();
+  const streams = await loadStreams();
+  renderStreams(streams);
 });
