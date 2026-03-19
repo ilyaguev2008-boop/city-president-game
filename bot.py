@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from html import escape
 
+import aiosqlite
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, Message
 
 from ai_service import complete_chat, split_for_telegram
 from config import load_settings
+from db import (
+    add_rss_source,
+    delete_rss_source,
+    ensure_user,
+    init_db,
+    list_rss_sources,
+)
 from keyboards import back_to_main_kb, main_menu_kb
+from rss_service import fetch_feed
 
 
 def main_menu_text(name: str, *, key_hint: str) -> str:
@@ -23,7 +33,32 @@ def main_menu_text(name: str, *, key_hint: str) -> str:
     )
 
 
+async def render_sources_html(user_id: int) -> str:
+    rows = await list_rss_sources(user_id)
+    if not rows:
+        return (
+            "<b>Мои источники информации</b>\n\n"
+            "Пока пусто. Добавь RSS командой:\n"
+            "<code>/add_rss https://…/feed.xml</code>\n\n"
+            "<i>На многих сайтах есть ссылка на ленту раздела.</i>"
+        )
+    lines: list[str] = ["<b>Мои источники информации</b>", ""]
+    for r in rows:
+        st = "✅" if r["enabled"] else "⏸"
+        title = escape(str(r["feed_title"] or "—"))
+        url = escape(str(r["url"]))
+        lines.append(f"{st} <b>#{r['id']}</b> {title}\n<code>{url}</code>\n")
+    lines.append("")
+    lines.append(
+        "<code>/add_rss URL</code> — добавить · "
+        "<code>/del_rss N</code> — удалить · <code>/rss_list</code>"
+    )
+    return "\n".join(lines)
+
+
 async def cmd_start(message: Message) -> None:
+    if message.from_user:
+        await ensure_user(message.from_user.id)
     settings = load_settings()
     name = (message.from_user.full_name if message.from_user else "друг").strip()
     key_hint = ""
@@ -40,10 +75,15 @@ async def cmd_start(message: Message) -> None:
 
 
 async def cmd_help(message: Message) -> None:
+    if message.from_user:
+        await ensure_user(message.from_user.id)
     await message.answer(
         "**Команды**\n"
         "/start — главное меню\n"
-        "/help — эта справка\n\n"
+        "/help — эта справка\n"
+        "/add_rss `URL` — добавить RSS/Atom\n"
+        "/rss_list — список твоих лент\n"
+        "/del_rss `N` — удалить источник по номеру\n\n"
         "**Меню**\n"
         "• *Мои каналы* — подключённые каналы и статус бота в них\n"
         "• *Мои источники* — RSS/ссылки, которые ты добавил\n"
@@ -56,6 +96,85 @@ async def cmd_help(message: Message) -> None:
         parse_mode="Markdown",
         reply_markup=main_menu_kb(),
     )
+
+
+async def cmd_add_rss(message: Message, command: CommandObject) -> None:
+    if not message.from_user:
+        return
+    await ensure_user(message.from_user.id)
+    raw = (command.args or "").strip()
+    if not raw:
+        await message.answer(
+            "Укажи ссылку на RSS или Atom, например:\n\n"
+            "<code>/add_rss https://example.com/rss.xml</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    status = await message.answer("Проверяю ленту…")
+    try:
+        preview = await fetch_feed(raw)
+    except ValueError as exc:
+        await status.edit_text(f"Не получилось: {escape(str(exc))}", parse_mode="HTML")
+        return
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("RSS fetch failed")
+        await status.edit_text(
+            f"Ошибка сети или сервера: <code>{escape(type(exc).__name__)}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        sid = await add_rss_source(
+            message.from_user.id,
+            url=preview.url,
+            feed_title=preview.title,
+        )
+    except aiosqlite.IntegrityError:
+        await status.edit_text("Такой URL уже есть в твоём списке.")
+        return
+
+    sample_lines = "\n".join(
+        f"• {escape(t)}"
+        for t, _ in preview.sample_entries[:3]
+    )
+    await status.edit_text(
+        f"Добавлено <b>#{sid}</b>: {escape(preview.title)}\n\n"
+        f"Примеры записей:\n{sample_lines}",
+        parse_mode="HTML",
+        reply_markup=main_menu_kb(),
+    )
+
+
+async def cmd_rss_list(message: Message) -> None:
+    if not message.from_user:
+        return
+    await ensure_user(message.from_user.id)
+    text = await render_sources_html(message.from_user.id)
+    await message.answer(text, parse_mode="HTML", reply_markup=main_menu_kb())
+
+
+async def cmd_del_rss(message: Message, command: CommandObject) -> None:
+    if not message.from_user:
+        return
+    await ensure_user(message.from_user.id)
+    arg = (command.args or "").strip()
+    if not arg.isdigit():
+        await message.answer(
+            "Укажи номер из списка, например: <code>/del_rss 2</code>",
+            parse_mode="HTML",
+        )
+        return
+    sid = int(arg)
+    ok = await delete_rss_source(message.from_user.id, sid)
+    if ok:
+        await message.answer(
+            f"Источник #{sid} удалён.",
+            reply_markup=main_menu_kb(),
+        )
+    else:
+        await message.answer("Не нашёл такой номер или он не твой.")
 
 
 async def ai_reply(message: Message, bot: Bot) -> None:
@@ -142,12 +261,14 @@ async def menu_router(callback: CallbackQuery) -> None:
         return
 
     if action == "sources":
+        if not callback.from_user:
+            await callback.answer()
+            return
+        await ensure_user(callback.from_user.id)
+        html = await render_sources_html(callback.from_user.id)
         await callback.message.edit_text(
-            "**Мои источники информации**\n\n"
-            "Здесь ты будешь добавлять **свои** ленты (предпочтительно **RSS/Atom**): "
-            "включение и выключение, привязка «источник → канал».\n\n"
-            "_Раздел в разработке._",
-            parse_mode="Markdown",
+            html,
+            parse_mode="HTML",
             reply_markup=back_to_main_kb(),
         )
         await callback.answer()
@@ -212,11 +333,16 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
     settings = load_settings()
+    await init_db()
+
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher(storage=MemoryStorage())
 
     dp.message.register(cmd_start, CommandStart())
     dp.message.register(cmd_help, Command("help"))
+    dp.message.register(cmd_add_rss, Command("add_rss"))
+    dp.message.register(cmd_rss_list, Command("rss_list"))
+    dp.message.register(cmd_del_rss, Command("del_rss"))
     dp.callback_query.register(menu_router, F.data.startswith("menu:"))
     dp.message.register(ai_reply, F.text & ~F.text.startswith("/"))
 

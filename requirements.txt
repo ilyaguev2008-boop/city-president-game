@@ -1,3 +1,5 @@
+aiosqlite==0.21.0
+feedparser==6.0.11
 aiofiles==25.1.0
 aiogram==3.26.0
 aiohappyeyeballs==2.6.1
