@@ -10,7 +10,17 @@ from aiogram.types import CallbackQuery, Message
 
 from ai_service import complete_chat, split_for_telegram
 from config import load_settings
-from keyboards import main_menu_kb
+from keyboards import back_to_main_kb, main_menu_kb
+
+
+def main_menu_text(name: str, *, key_hint: str) -> str:
+    return (
+        f"Привет, {name}!\n\n"
+        "Это бот **автопостинга в Telegram-каналы**: материалы из **твоих** источников "
+        "(лучше всего RSS), пересказ на русском, пост без лишних ссылок и с одной картинкой.\n\n"
+        "Выбери раздел ниже или напиши вопрос в чат — отвечу по настройке и работе бота."
+        f"{key_hint}"
+    )
 
 
 async def cmd_start(message: Message) -> None:
@@ -19,26 +29,30 @@ async def cmd_start(message: Message) -> None:
     key_hint = ""
     if not settings.openai_api_key:
         key_hint = (
-            "\n\n⚠️ Добавь в `.env` ключ `OPENAI_API_KEY=...` "
-            "(или совместимый API), затем перезапусти бота."
+            "\n\n⚠️ Для ответов в чате добавь в `.env` ключ `OPENAI_API_KEY=...` "
+            "и перезапусти бота."
         )
-    text = (
-        f"Привет, {name}!\n\n"
-        "Я AI-помощник для малого бизнеса: маркетинг, офферы, тексты для клиентов, "
-        "идеи продвижения и ценообразование в общих чертах — просто напиши вопрос в чат."
-        f"{key_hint}"
+    await message.answer(
+        main_menu_text(name, key_hint=key_hint),
+        parse_mode="Markdown",
+        reply_markup=main_menu_kb(),
     )
-    await message.answer(text, reply_markup=main_menu_kb())
 
 
 async def cmd_help(message: Message) -> None:
     await message.answer(
-        "Команды:\n"
-        "/start — меню\n"
+        "**Команды**\n"
+        "/start — главное меню\n"
         "/help — эта справка\n\n"
-        "**Как пользоваться:** напиши любой вопрос по бизнесу одним сообщением.\n\n"
-        "**Настройка ИИ:** в `.env` задай `OPENAI_API_KEY`, при необходимости "
-        "`OPENAI_BASE_URL` (для совместимых API) и `OPENAI_MODEL`.",
+        "**Меню**\n"
+        "• *Мои каналы* — подключённые каналы и статус бота в них\n"
+        "• *Мои источники* — RSS/ссылки, которые ты добавил\n"
+        "• *Статус* — сводка и предупреждения\n"
+        "• *Настройки постинга* — интервал, лимиты, картинки\n"
+        "• *Черновики и очередь* — предпросмотр и публикация\n"
+        "• *Помощь* — как подключить канал и RSS\n\n"
+        "**ИИ:** в `.env` задай `OPENAI_API_KEY`, при необходимости "
+        "`OPENAI_BASE_URL` и `OPENAI_MODEL`.",
         parse_mode="Markdown",
         reply_markup=main_menu_kb(),
     )
@@ -52,7 +66,7 @@ async def ai_reply(message: Message, bot: Bot) -> None:
         await message.answer(
             "Ключ ИИ не настроен. Добавь в `.env` строку:\n\n"
             "`OPENAI_API_KEY=sk-...`\n\n"
-            "Перезапусти бота и напиши вопрос снова."
+            "Перезапусти бота или открой /start."
         )
         return
 
@@ -78,52 +92,120 @@ async def ai_reply(message: Message, bot: Bot) -> None:
         )
         return
 
-    for chunk in split_for_telegram(answer):
-        if chunk:
-            await message.answer(chunk)
+    chunks = [c for c in split_for_telegram(answer) if c]
+    for i, chunk in enumerate(chunks):
+        await message.answer(
+            chunk,
+            reply_markup=main_menu_kb() if i == len(chunks) - 1 else None,
+        )
 
 
-async def menu_router(callback: CallbackQuery, state=None) -> None:
-    if not callback.data:
+async def menu_router(callback: CallbackQuery) -> None:
+    if not callback.data or not callback.message:
         return
-    action = callback.data.split(":", 1)[1]
+    parts = callback.data.split(":", 1)
+    if len(parts) < 2:
+        await callback.answer()
+        return
+    action = parts[1]
+
+    name = "друг"
+    if callback.from_user and callback.from_user.full_name:
+        name = callback.from_user.full_name.strip()
+    key_hint = ""
+    settings = load_settings()
+    if not settings.openai_api_key:
+        key_hint = (
+            "\n\n⚠️ Для ответов в чате добавь в `.env` ключ `OPENAI_API_KEY=...` "
+            "и перезапусти бота."
+        )
 
     if action == "home":
         await callback.message.edit_text(
-            "Главное меню. Напиши вопрос по бизнесу в чат или нажми «Примеры».",
+            main_menu_text(name, key_hint=key_hint),
+            parse_mode="Markdown",
             reply_markup=main_menu_kb(),
         )
         await callback.answer()
         return
 
-    if action == "about":
+    if action == "channels":
         await callback.message.edit_text(
-            "Я помогаю самозанятым и малому бизнесу:\n"
-            "• тексты постов и ответы клиентам\n"
-            "• офферы и акции\n"
-            "• идеи продвижения\n"
-            "• цена и позиционирование (общие советы)\n"
-            "• порядок действий без «магии»\n\n"
-            "Пиши вопрос обычным сообщением — отвечу по существу.",
-            reply_markup=main_menu_kb(),
+            "**Мои каналы**\n\n"
+            "Здесь будет список каналов, привязанных к твоему аккаунту: имя, ID, "
+            "есть ли у бота право публиковать посты, последняя успешная публикация.\n\n"
+            "_Сейчас раздел в разработке: данные и действия появятся после подключения БД._",
+            parse_mode="Markdown",
+            reply_markup=back_to_main_kb(),
         )
         await callback.answer()
         return
 
-    if action == "examples":
+    if action == "sources":
         await callback.message.edit_text(
-            "Примеры вопросов (скопируй и отправь):\n\n"
-            "• У меня салон красоты в Алматы, 2 мастера. Как привлечь клиентов в Instagram за месяц?\n"
-            "• Напиши короткий текст поста про скидку 20% на первую запись, тон дружелюбный.\n"
-            "• Клиент просит скидку 30%, как ответить вежливо и удержать маржу?\n"
-            "• Я делаю сайты на Tilda, как сформулировать оффер для локального бизнеса?\n\n"
-            "Добавь своё: город, ниша, средний чек — ответ будет точнее.",
-            reply_markup=main_menu_kb(),
+            "**Мои источники информации**\n\n"
+            "Здесь ты будешь добавлять **свои** ленты (предпочтительно **RSS/Atom**): "
+            "включение и выключение, привязка «источник → канал».\n\n"
+            "_Раздел в разработке._",
+            parse_mode="Markdown",
+            reply_markup=back_to_main_kb(),
         )
         await callback.answer()
         return
 
-    await callback.answer("Не понял действие.")
+    if action == "status":
+        await callback.message.edit_text(
+            "**Статус**\n\n"
+            "Здесь будет сводка: сколько каналов и активных источников, последний пост, "
+            "предупреждения (нет ключа ИИ, бот не админ в канале, источник не отвечает).\n\n"
+            "_Раздел в разработке._",
+            parse_mode="Markdown",
+            reply_markup=back_to_main_kb(),
+        )
+        await callback.answer()
+        return
+
+    if action == "settings":
+        await callback.message.edit_text(
+            "**Настройки постинга**\n\n"
+            "Интервал или лимит постов в сутки, тихие часы, политика картинки "
+            "(с сайта / сгенерировать, если нет), текст без сторонних ссылок.\n\n"
+            "_Раздел в разработке._",
+            parse_mode="Markdown",
+            reply_markup=back_to_main_kb(),
+        )
+        await callback.answer()
+        return
+
+    if action == "drafts":
+        await callback.message.edit_text(
+            "**Черновики и очередь**\n\n"
+            "Предпросмотр следующего материала, «опубликовать сейчас», «пропустить».\n\n"
+            "_Раздел в разработке._",
+            parse_mode="Markdown",
+            reply_markup=back_to_main_kb(),
+        )
+        await callback.answer()
+        return
+
+    if action == "help":
+        await callback.message.edit_text(
+            "**Помощь**\n\n"
+            "1. Создай канал в Telegram (или возьми существующий).\n"
+            "2. Добавь этого бота **администратором** канала с правом **публиковать сообщения**.\n"
+            "3. Узнай **ID канала** (например, через ботов вроде @getidsbot или пересланное "
+            "сообщение с канала — формат часто `-100…`).\n"
+            "4. Источники лучше добавлять как **RSS**: у многих СМИ есть ссылка на ленту "
+            "раздела или главной страницы.\n\n"
+            "Если что-то не работает — опиши в чате одним сообщением, постараюсь подсказать.\n\n"
+            "Команда /help — полная справка по меню.",
+            parse_mode="Markdown",
+            reply_markup=back_to_main_kb(),
+        )
+        await callback.answer()
+        return
+
+    await callback.answer("Неизвестный раздел.")
 
 
 async def main() -> None:
