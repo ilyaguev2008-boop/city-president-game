@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from typing import Any
+from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 
 import feedparser
@@ -30,6 +31,25 @@ def normalize_http_url(raw: str) -> str:
     return _normalize_url(raw)
 
 
+def _download_url_bytes(url: str, *, timeout_sec: int = 15) -> tuple[str, bytes]:
+    req = Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            )
+        },
+    )
+    try:
+        with urlopen(req, timeout=timeout_sec) as resp:
+            body = resp.read()
+            final_url = resp.geturl() or url
+            return final_url, body
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"Сервер не отвечает или блокирует доступ ({type(exc).__name__}).") from exc
+
+
 def try_fetch_feed_sync(url: str) -> FeedPreview | None:
     """Пробует скачать ленту; при неудаче возвращает None (без исключения)."""
     try:
@@ -40,7 +60,8 @@ def try_fetch_feed_sync(url: str) -> FeedPreview | None:
 
 def fetch_feed_sync(url: str) -> FeedPreview:
     url = _normalize_url(url)
-    parsed: Any = feedparser.parse(url)
+    final_url, body = _download_url_bytes(url)
+    parsed: Any = feedparser.parse(body)
     if not getattr(parsed, "feed", None):
         raise ValueError("Не похоже на RSS/Atom или сервер не ответил.")
 
@@ -62,7 +83,7 @@ def fetch_feed_sync(url: str) -> FeedPreview:
     if not entries:
         raise ValueError("В ленте пока нет записей — попробуй позже или другой URL.")
 
-    return FeedPreview(title=feed_title, url=url, sample_entries=sample)
+    return FeedPreview(title=feed_title, url=final_url, sample_entries=sample)
 
 
 async def fetch_feed(url: str) -> FeedPreview:

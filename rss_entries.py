@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from typing import Any
+from urllib.request import Request, urlopen
 
 import feedparser
 
@@ -59,8 +60,23 @@ def _extract_image_url(entry: dict[str, Any]) -> str | None:
     return None
 
 
+def _download_feed_bytes(feed_url: str, *, timeout_sec: int = 15) -> bytes:
+    req = Request(
+        feed_url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            )
+        },
+    )
+    with urlopen(req, timeout=timeout_sec) as resp:
+        return resp.read()
+
+
 def parse_feed_entries_sync(feed_url: str) -> list[FeedItem]:
-    parsed: Any = feedparser.parse(feed_url)
+    body = _download_feed_bytes(feed_url)
+    parsed: Any = feedparser.parse(body)
     raw_entries = list(getattr(parsed, "entries", []) or [])
     out: list[FeedItem] = []
     for e in raw_entries:
