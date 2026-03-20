@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 DB_DIR = Path(__file__).resolve().parent / "data"
 DB_PATH = DB_DIR / "bot.db"
 
-# Схема под будущий функционал: пользователи, каналы, RSS, учёт опубликованного.
+# Схема: пользователи, каналы, источники новостей (RSS-ленты), учёт опубликованного.
 INIT_SQL = """
 PRAGMA foreign_keys = ON;
 
@@ -140,7 +140,7 @@ async def add_rss_source(
     feed_title: str | None,
     channel_id: int | None = None,
 ) -> int:
-    """Добавляет RSS-источник. Возвращает id. Бросает aiosqlite.IntegrityError при дубликате URL."""
+    """Добавляет источник новостей (URL ленты). Возвращает id. Бросает aiosqlite.IntegrityError при дубликате URL."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA foreign_keys = ON")
         cur = await db.execute(

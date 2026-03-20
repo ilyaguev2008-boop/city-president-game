@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.request import Request, urlopen
@@ -20,9 +21,22 @@ def _normalize_url(raw: str) -> str:
     u = raw.strip()
     if not u:
         raise ValueError("Пустая ссылка")
+    if " " in u or "\n" in u:
+        raise ValueError("Укажи ссылку одной строкой без пробелов и переносов")
+    added_scheme = False
+    if not re.match(r"^https?://", u, re.IGNORECASE):
+        u = "https://" + u.lstrip("/")
+        added_scheme = True
     parsed = urlparse(u)
     if parsed.scheme not in ("http", "https"):
         raise ValueError("Нужна ссылка с http:// или https://")
+    host = (parsed.netloc or "").split("@")[-1].split(":")[0]
+    if not host:
+        raise ValueError("Некорректная ссылка")
+    if added_scheme and "." not in host and host.lower() not in ("localhost", "127.0.0.1", "::1"):
+        raise ValueError(
+            "Похоже на неполный адрес. Укажи как в браузере: site.ru или https://site.ru"
+        )
     return u
 
 
@@ -31,7 +45,15 @@ def normalize_http_url(raw: str) -> str:
     return _normalize_url(raw)
 
 
-def _download_url_bytes(url: str, *, timeout_sec: int = 15) -> tuple[str, bytes]:
+def try_normalize_http_url(raw: str) -> str | None:
+    """Как normalize_http_url, но без исключения — для распознавания ввода в чате."""
+    try:
+        return normalize_http_url(raw)
+    except ValueError:
+        return None
+
+
+def _download_url_bytes(url: str, *, timeout_sec: int = 12) -> tuple[str, bytes]:
     req = Request(
         url,
         headers={
@@ -63,7 +85,7 @@ def fetch_feed_sync(url: str) -> FeedPreview:
     final_url, body = _download_url_bytes(url)
     parsed: Any = feedparser.parse(body)
     if not getattr(parsed, "feed", None):
-        raise ValueError("Не похоже на RSS/Atom или сервер не ответил.")
+        raise ValueError("Не похоже на ленту новостей или сервер не ответил.")
 
     feed_title = (parsed.feed.get("title") or "").strip() or "Без названия"
     entries = list(getattr(parsed, "entries", []) or [])
@@ -87,5 +109,5 @@ def fetch_feed_sync(url: str) -> FeedPreview:
 
 
 async def fetch_feed(url: str) -> FeedPreview:
-    """Загружает и разбирает RSS/Atom (feedparser в отдельном потоке)."""
+    """Загружает и разбирает ленту новостей (feedparser в отдельном потоке)."""
     return await asyncio.to_thread(fetch_feed_sync, url)

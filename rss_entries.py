@@ -60,7 +60,7 @@ def _extract_image_url(entry: dict[str, Any]) -> str | None:
     return None
 
 
-def _download_feed_bytes(feed_url: str, *, timeout_sec: int = 15) -> bytes:
+def _download_feed_bytes(feed_url: str, *, timeout_sec: int = 12) -> bytes:
     req = Request(
         feed_url,
         headers={

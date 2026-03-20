@@ -5,7 +5,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Мои 📺 каналы", callback_data="menu:channels")],
-            [InlineKeyboardButton(text="Мои 📰 источники", callback_data="menu:sources")],
+            [InlineKeyboardButton(text="📰 Источники новостей", callback_data="menu:sources")],
             [InlineKeyboardButton(text="Статус", callback_data="menu:status")],
             [InlineKeyboardButton(text="Настройки постинга", callback_data="menu:settings")],
             [InlineKeyboardButton(text="Черновики и очередь", callback_data="menu:drafts")],
@@ -36,9 +36,9 @@ def channels_kb() -> InlineKeyboardMarkup:
 def sources_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Добавить источник", callback_data="src:add")],
+            [InlineKeyboardButton(text="Добавить источник новостей", callback_data="src:add")],
             [InlineKeyboardButton(text="Привязать к каналу", callback_data="src:link")],
-            [InlineKeyboardButton(text="Удалить источник", callback_data="src:del")],
+            [InlineKeyboardButton(text="Удалить источник новостей", callback_data="src:del")],
             [InlineKeyboardButton(text="Опубликовать 1 пост", callback_data="src:post_once")],
             [InlineKeyboardButton(text="Обновить список", callback_data="menu:sources")],
             [InlineKeyboardButton(text="« Главное меню", callback_data="menu:home")],

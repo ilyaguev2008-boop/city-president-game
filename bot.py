@@ -31,6 +31,7 @@ from db import (
     update_posting_settings,
 )
 from feed_discovery import resolve_to_feed_preview
+from rss_service import try_normalize_http_url
 from keyboards import (
     back_to_main_kb,
     channels_kb,
@@ -40,18 +41,31 @@ from keyboards import (
 )
 from post_worker import process_one_feed_job, run_post_worker_loop
 
-URL_ONE_LINE = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
 TG_LINK_RE = re.compile(r"^(?:https?://)?(?:t\.me/|telegram\.me/)?@?([A-Za-z0-9_]{5,})/?$", re.IGNORECASE)
 pending_action_by_user: dict[int, str] = {}
+
+
+def looks_like_single_line_site_url(text: str) -> bool:
+    """Одна строка, похожая на URL сайта или ленты (в т.ч. без https://)."""
+    t = (text or "").strip()
+    if not t or len(t) > 4000:
+        return False
+    if try_normalize_http_url(t) is None:
+        return False
+    tl = t.lower()
+    # Ссылки на Telegram-каналы обрабатываются в «Мои каналы», не как лента новостей.
+    if "t.me/" in tl or "telegram.me/" in tl:
+        return False
+    return True
 
 
 def main_menu_text(name: str, *, key_hint: str) -> str:
     return (
         f"Привет, {name}!\n\n"
-        "Это бот **автопостинга в Telegram-каналы**: материалы из **твоих** источников "
-        "(лучше всего RSS), пересказ на русском, пост без лишних ссылок и с одной картинкой.\n\n"
-        "**Источник:** пришли в чат **одной строкой** ссылку на **сайт** (https://…) — бот "
-        "попробует найти ленту сам. Или выбери раздел «Мои источники».\n\n"
+        "Это бот **автопостинга в Telegram-каналы**: материалы из **твоих** источников новостей "
+        "(через ленту сайта), пересказ на русском, пост без лишних ссылок и с одной картинкой.\n\n"
+        "**Источник новостей:** пришли в чат **одной строкой** ссылку на **сайт** (https://…) — бот "
+        "попробует найти ленту сам. Или открой раздел «Источники новостей».\n\n"
         "Другой вопрос по боту — просто напиши текстом (не одной только ссылкой)."
         f"{key_hint}"
     )
@@ -61,14 +75,14 @@ async def render_sources_html(user_id: int) -> str:
     rows = await list_rss_sources(user_id)
     if not rows:
         return (
-            "<b>Мои источники информации</b>\n\n"
+            "<b>Источники новостей</b>\n\n"
             "Пока пусто.\n\n"
-            "• Пришли <b>одной строкой</b> ссылку на <b>сайт</b> (https://…) — постараюсь "
-            "найти RSS сам.\n"
-            "• Привязка к каналу пока делается через номер источника и номер канала "
+            "• Пришли <b>одной строкой</b> адрес сайта или ленты (в т.ч. без https://) — "
+            "постараюсь найти ленту новостей сам.\n"
+            "• Привязка к каналу пока делается через номер источника новостей и номер канала "
             "(добавим отдельные кнопки следующим шагом)."
         )
-    lines: list[str] = ["<b>Мои источники информации</b>", ""]
+    lines: list[str] = ["<b>Источники новостей</b>", ""]
     for r in rows:
         st = "✅" if r["enabled"] else "⏸"
         title = escape(str(r["feed_title"] or "—"))
@@ -83,7 +97,7 @@ async def render_sources_html(user_id: int) -> str:
             f"{st} <b>#{r['id']}</b> {title}\n<code>{url}</code>{ch_line}\n"
         )
     lines.append("")
-    lines.append("Чтобы добавить источник, просто пришли ссылку на сайт одной строкой.")
+    lines.append("Чтобы добавить источник новостей, пришли ссылку на сайт одной строкой.")
     return "\n".join(lines)
 
 
@@ -132,7 +146,7 @@ async def render_settings_html(user_id: int) -> str:
         f"Автопост: <b>{escape(on)}</b>\n"
         f"Сегодня опубликовано: <b>{daily}</b> из <b>{max_d}</b> (лимит в сутки)\n"
         f"Тихие часы: {escape(quiet_line)}\n"
-        f"Картинки из RSS: <b>{escape(im)}</b>\n\n"
+        f"Картинки из ленты новостей: <b>{escape(im)}</b>\n\n"
         "Управляй параметрами кнопками ниже."
     )
 
@@ -147,11 +161,9 @@ async def render_settings_kb(user_id: int):
     )
 
 
-async def render_status_html(user_id: int, settings) -> str:
+async def render_status_html(user_id: int) -> str:
     st = await get_user_stats(user_id)
     last = await get_last_event_for_user(user_id)
-    ai_ok = bool(settings.openai_api_key)
-    ai_line = "✅ ключ задан" if ai_ok else "❌ нет ключа — автопост и пересказ не работают"
     if last:
         icon = "✅" if str(last["level"]) == "info" else "⚠️"
         last_line = (
@@ -163,12 +175,9 @@ async def render_status_html(user_id: int, settings) -> str:
     return (
         "<b>Статус</b>\n\n"
         f"Каналов: <b>{st['channels']}</b>\n"
-        f"Источников RSS: <b>{st['sources']}</b>\n"
+        f"Источников новостей: <b>{st['sources']}</b>\n"
         f"Привязано к каналам: <b>{st['linked_sources']}</b>\n"
         f"Уже опубликовано записей: <b>{st['posted_entries']}</b>\n\n"
-        f"ИИ: {ai_line}\n"
-        f"Интервал опроса RSS: <code>{settings.poll_interval_sec}</code> с "
-        "(<code>POLL_INTERVAL_SEC</code> в .env)\n\n"
         f"Последнее событие: {last_line}"
     )
 
@@ -258,7 +267,14 @@ async def run_add_feed_pipeline(message: Message, status: Message, raw: str) -> 
     raw = raw.strip()
     await status.edit_text("Ищу ленту…")
     try:
-        preview = await resolve_to_feed_preview(raw)
+        preview = await asyncio.wait_for(resolve_to_feed_preview(raw), timeout=75.0)
+    except asyncio.TimeoutError:
+        await status.edit_text(
+            "Слишком долго жду ответа сайта. Попробуй прямую ссылку на ленту "
+            "(часто это …/feed/ или …/rss) или повтори позже.",
+            parse_mode="HTML",
+        )
+        return
     except ValueError as exc:
         await status.edit_text(f"Не получилось: {escape(str(exc))}", parse_mode="HTML")
         return
@@ -286,7 +302,7 @@ async def run_add_feed_pipeline(message: Message, status: Message, raw: str) -> 
     )
     await status.edit_text(
         f"Добавлено <b>#{sid}</b>: {escape(preview.title)}\n\n"
-        f"Лента: <code>{escape(preview.url)}</code>\n\n"
+        f"Лента новостей: <code>{escape(preview.url)}</code>\n\n"
         f"Примеры записей:\n{sample_lines}",
         parse_mode="HTML",
         reply_markup=main_menu_kb(),
@@ -294,7 +310,7 @@ async def run_add_feed_pipeline(message: Message, status: Message, raw: str) -> 
 
 
 async def message_plain_url_as_source(message: Message) -> None:
-    """Одна строка https://… — считаем попыткой добавить источник (раньше ответа ИИ)."""
+    """Одна строка https://… — попытка добавить источник новостей (раньше ответа ИИ)."""
     if not message.from_user or not message.text:
         return
     await ensure_user(message.from_user.id)
@@ -335,24 +351,28 @@ async def handle_pending_action_input(message: Message, bot: Bot) -> bool:
 
     if action == "del_source":
         if not raw.isdigit():
-            await message.answer("Нужен номер источника из списка, например: 3")
+            await message.answer("Нужен номер источника новостей из списка, например: 3")
             return True
         pending_action_by_user.pop(user_id, None)
         sid = int(raw)
         ok = await delete_rss_source(user_id, sid)
-        await message.answer(f"Источник #{sid} удалён." if ok else "Не нашёл такой номер или он не твой.")
+        await message.answer(
+            f"Источник новостей #{sid} удалён." if ok else "Не нашёл такой номер или он не твой."
+        )
         return True
 
     if action == "link_source":
         parts = raw.split()
         if len(parts) != 2 or not all(p.isdigit() for p in parts):
-            await message.answer("Нужно два номера: сначала источник, потом канал. Пример: 4 2")
+            await message.answer(
+                "Нужно два номера: сначала источник новостей, потом канал. Пример: 4 2"
+            )
             return True
         pending_action_by_user.pop(user_id, None)
         rss_id, ch_id = int(parts[0]), int(parts[1])
         ok = await set_rss_source_channel(user_id, rss_id=rss_id, channel_id=ch_id)
         await message.answer(
-            f"Готово: источник #{rss_id} → канал #{ch_id}."
+            f"Готово: источник новостей #{rss_id} → канал #{ch_id}."
             if ok
             else "Не вышло — проверь номера # в списках и что канал твой."
         )
@@ -360,7 +380,7 @@ async def handle_pending_action_input(message: Message, bot: Bot) -> bool:
 
     if action == "post_once":
         if not raw.isdigit():
-            await message.answer("Нужен номер источника из списка, например: 1")
+            await message.answer("Нужен номер источника новостей из списка, например: 1")
             return True
         pending_action_by_user.pop(user_id, None)
         settings = load_settings()
@@ -369,7 +389,7 @@ async def handle_pending_action_input(message: Message, bot: Bot) -> bool:
             return True
         jid = await get_feed_job_for_user(user_id, int(raw))
         if not jid:
-            await message.answer("Источник не найден, не привязан к каналу или выключен.")
+            await message.answer("Источник новостей не найден, не привязан к каналу или выключен.")
             return True
         status = await message.answer("Публикую одну запись…")
         posted = await process_one_feed_job(bot, settings, jid, ignore_user_posting_rules=True)
@@ -426,7 +446,7 @@ async def on_text_message(message: Message, bot: Bot) -> None:
         return
     if await handle_pending_action_input(message, bot):
         return
-    if URL_ONE_LINE.match(message.text.strip()):
+    if looks_like_single_line_site_url(message.text):
         await message_plain_url_as_source(message)
         return
     await ai_reply(message, bot)
@@ -490,7 +510,7 @@ async def menu_router(callback: CallbackQuery) -> None:
             await callback.answer()
             return
         await ensure_user(callback.from_user.id)
-        html = await render_status_html(callback.from_user.id, settings)
+        html = await render_status_html(callback.from_user.id)
         await callback.message.edit_text(
             html,
             parse_mode="HTML",
@@ -531,8 +551,8 @@ async def menu_router(callback: CallbackQuery) -> None:
             "1. Создай канал в Telegram (или возьми существующий).\n"
             "2. Добавь этого бота **администратором** канала с правом **публиковать сообщения**.\n"
             "3. Возьми ссылку канала вида <code>https://t.me/your_channel</code>.\n"
-            "4. Источники лучше добавлять как **RSS**: у многих СМИ есть ссылка на ленту "
-            "раздела или главной страницы.\n\n"
+            "4. **Источники новостей** удобно добавлять по ссылке на сайт: у многих СМИ есть "
+            "лента раздела или главной страницы.\n\n"
             "Если что-то не работает — опиши в чате одним сообщением, постараюсь подсказать.\n\n"
             "Подробности и управление — через кнопки меню.",
             parse_mode="Markdown",
@@ -575,25 +595,31 @@ async def sources_router(callback: CallbackQuery) -> None:
     if action == "add":
         pending_action_by_user[user_id] = "add_source"
         await callback.answer()
-        await callback.message.answer("Пришли ссылку на сайт или RSS одной строкой.")
+        await callback.message.answer(
+            "Пришли одной строкой ссылку на сайт или прямую ссылку на ленту новостей."
+        )
         return
     if action == "link":
         pending_action_by_user[user_id] = "link_source"
         await callback.answer()
         await callback.message.answer(
-            "Пришли два номера через пробел: сначала источник, потом канал.\n"
+            "Пришли два номера через пробел: сначала источник новостей, потом канал.\n"
             "Пример: 4 2"
         )
         return
     if action == "del":
         pending_action_by_user[user_id] = "del_source"
         await callback.answer()
-        await callback.message.answer("Пришли номер источника # из списка «Мои источники».")
+        await callback.message.answer(
+            "Пришли номер источника новостей # из списка «Источники новостей»."
+        )
         return
     if action == "post_once":
         pending_action_by_user[user_id] = "post_once"
         await callback.answer()
-        await callback.message.answer("Пришли номер источника # для публикации одной записи.")
+        await callback.message.answer(
+            "Пришли номер источника новостей # для публикации одной записи."
+        )
         return
     await callback.answer()
 

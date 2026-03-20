@@ -78,13 +78,13 @@ async def process_one_feed_job(
     try:
         items = await parse_feed_entries(rss_url)
     except Exception:
-        logger.exception("Ошибка чтения RSS source_id=%s", source_id)
+        logger.exception("Ошибка чтения ленты source_id=%s", source_id)
         await add_worker_event(
             user_id=user_id,
             source_id=source_id,
             level="error",
             kind="rss_read",
-            message="Ошибка чтения RSS",
+            message="Ошибка чтения ленты новостей",
         )
         return False
 
@@ -168,7 +168,7 @@ async def process_one_feed_job(
 
 
 async def run_post_worker_loop(bot: Bot) -> None:
-    """Фоновый цикл: новые записи из привязанных RSS → пересказ → канал."""
+    """Фоновый цикл: новые записи из привязанных источников новостей → пересказ → канал."""
     await asyncio.sleep(5)
     while True:
         settings = load_settings()

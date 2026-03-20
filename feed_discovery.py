@@ -11,6 +11,9 @@ from rss_service import FeedPreview, try_fetch_feed_sync, normalize_http_url
 
 logger = logging.getLogger(__name__)
 
+# Ограничиваем перебор: иначе при «тугом» сайте можно ждать минуты.
+MAX_FEED_CANDIDATES = 14
+
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -102,7 +105,7 @@ async def _build_candidates(page_url: str) -> list[str]:
 
 async def resolve_to_feed_preview(start_url: str) -> FeedPreview:
     """
-    Принимает URL сайта или прямой RSS/Atom.
+    Принимает URL сайта или прямую ссылку на ленту новостей.
     Сначала пробует ленту по исходному адресу, затем ищет на странице и типовые пути.
     """
     u = normalize_http_url(start_url)
@@ -111,12 +114,12 @@ async def resolve_to_feed_preview(start_url: str) -> FeedPreview:
         return direct
 
     candidates = await _build_candidates(u)
-    for cand in candidates:
+    for cand in candidates[:MAX_FEED_CANDIDATES]:
         prev = await asyncio.to_thread(try_fetch_feed_sync, cand)
         if prev:
             return prev
 
     raise ValueError(
-        "Не нашёл RSS или Atom по этой ссылке. Попробуй другой сайт, "
-        "прямую ссылку на ленту или команду /add_rss …"
+        "Не нашёл ленту новостей по этой ссылке. Попробуй другой сайт "
+        "или прямую ссылку на ленту."
     )
