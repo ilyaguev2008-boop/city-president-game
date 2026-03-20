@@ -8,18 +8,47 @@ from aiogram.types import URLInputFile
 
 from ai_service import rewrite_news_ru, split_for_telegram
 from config import load_settings
-from db import add_worker_event, is_entry_posted, list_feeding_jobs, mark_entry_posted
+from db import (
+    add_worker_event,
+    get_daily_post_count,
+    get_posting_settings,
+    increment_daily_post,
+    is_entry_posted,
+    list_feeding_jobs,
+    mark_entry_posted,
+)
+from posting_rules import is_quiet_hour_local
 from rss_entries import parse_feed_entries
 from text_utils import strip_urls
 
 logger = logging.getLogger(__name__)
 
 
-async def process_one_feed_job(bot: Bot, settings, job: dict[str, object]) -> bool:
+async def process_one_feed_job(
+    bot: Bot,
+    settings,
+    job: dict[str, object],
+    *,
+    ignore_user_posting_rules: bool = False,
+) -> bool:
     source_id = int(job["source_id"])
     user_id = int(job["user_id"])
     chat_id = int(job["chat_id"])
     rss_url = str(job["rss_url"])
+
+    ps = await get_posting_settings(user_id)
+    if not ignore_user_posting_rules:
+        if not ps["posting_enabled"]:
+            return False
+        if await get_daily_post_count(user_id) >= int(ps["max_posts_per_day"]):
+            return False
+        if is_quiet_hour_local(
+            start_hour=ps["quiet_start_hour"],
+            end_hour=ps["quiet_end_hour"],
+        ):
+            return False
+
+    send_images = bool(ps["send_images"])
 
     # Явно проверяем, что бот всё ещё может писать в канал.
     try:
@@ -90,7 +119,7 @@ async def process_one_feed_job(bot: Bot, settings, job: dict[str, object]) -> bo
             text = strip_urls(f"{item.title}\n\n{item.body_text}")
 
         photo_ok = False
-        if item.image_url:
+        if send_images and item.image_url:
             try:
                 cap = text[:1024]
                 await bot.send_photo(
@@ -125,6 +154,7 @@ async def process_one_feed_job(bot: Bot, settings, job: dict[str, object]) -> bo
                 return False
 
         await mark_entry_posted(source_id, item.entry_key)
+        await increment_daily_post(user_id)
         await add_worker_event(
             user_id=user_id,
             source_id=source_id,

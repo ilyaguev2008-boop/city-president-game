@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date
 from pathlib import Path
 
 import aiosqlite
@@ -63,6 +64,25 @@ CREATE INDEX IF NOT EXISTS idx_posted_source ON posted_entries (source_id);
 CREATE INDEX IF NOT EXISTS idx_worker_events_user_created ON worker_events (user_id, created_at DESC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_user_url ON rss_sources (user_id, url);
+
+CREATE TABLE IF NOT EXISTS user_posting_settings (
+    user_id INTEGER PRIMARY KEY REFERENCES users (user_id) ON DELETE CASCADE,
+    posting_enabled INTEGER NOT NULL DEFAULT 1 CHECK (posting_enabled IN (0, 1)),
+    max_posts_per_day INTEGER NOT NULL DEFAULT 20,
+    quiet_start_hour INTEGER,
+    quiet_end_hour INTEGER,
+    send_images INTEGER NOT NULL DEFAULT 1 CHECK (send_images IN (0, 1)),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS user_daily_posts (
+    user_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_daily_day ON user_daily_posts (day);
 """
 
 
@@ -387,6 +407,102 @@ async def get_user_stats(user_id: int) -> dict[str, int]:
         "linked_sources": n_linked,
         "posted_entries": n_posted,
     }
+
+
+async def ensure_posting_settings(user_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            "INSERT OR IGNORE INTO user_posting_settings (user_id) VALUES (?)",
+            (user_id,),
+        )
+        await db.commit()
+
+
+async def get_posting_settings(user_id: int) -> dict[str, object]:
+    await ensure_posting_settings(user_id)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            """
+            SELECT posting_enabled, max_posts_per_day, quiet_start_hour, quiet_end_hour, send_images
+            FROM user_posting_settings
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        )
+        row = await cur.fetchone()
+    if not row:
+        raise RuntimeError("user_posting_settings row missing")
+    return {
+        "posting_enabled": bool(row[0]),
+        "max_posts_per_day": int(row[1]),
+        "quiet_start_hour": row[2],
+        "quiet_end_hour": row[3],
+        "send_images": bool(row[4]),
+    }
+
+
+async def update_posting_settings(user_id: int, **kwargs: object) -> None:
+    allowed = {
+        "posting_enabled",
+        "max_posts_per_day",
+        "quiet_start_hour",
+        "quiet_end_hour",
+        "send_images",
+    }
+    if not kwargs:
+        return
+    bad = set(kwargs) - allowed
+    if bad:
+        raise ValueError(f"unknown keys: {bad}")
+    await ensure_posting_settings(user_id)
+    cols = ", ".join(f"{k} = ?" for k in kwargs)
+    vals = list(kwargs.values())
+    vals.append(user_id)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            f"""
+            UPDATE user_posting_settings
+            SET {cols}, updated_at = datetime('now')
+            WHERE user_id = ?
+            """,
+            vals,
+        )
+        await db.commit()
+
+
+async def get_daily_post_count(user_id: int) -> int:
+    day = date.today().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            "SELECT count FROM user_daily_posts WHERE user_id = ? AND day = ?",
+            (user_id, day),
+        )
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+async def increment_daily_post(user_id: int) -> int:
+    day = date.today().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            """
+            INSERT INTO user_daily_posts (user_id, day, count) VALUES (?, ?, 1)
+            ON CONFLICT(user_id, day) DO UPDATE SET count = count + 1
+            """,
+            (user_id, day),
+        )
+        await db.commit()
+        cur = await db.execute(
+            "SELECT count FROM user_daily_posts WHERE user_id = ? AND day = ?",
+            (user_id, day),
+        )
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
 
 
 async def get_last_event_for_user(user_id: int) -> dict[str, object] | None:

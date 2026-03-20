@@ -7,7 +7,7 @@ from html import escape
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.filters import CommandStart
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, Message
 
@@ -19,20 +19,30 @@ from db import (
     delete_channel,
     delete_rss_source,
     ensure_user,
+    get_daily_post_count,
     get_feed_job_for_user,
     get_last_event_for_user,
+    get_posting_settings,
     get_user_stats,
     init_db,
     list_channels,
     list_rss_sources,
     set_rss_source_channel,
+    update_posting_settings,
 )
 from feed_discovery import resolve_to_feed_preview
-from keyboards import back_to_main_kb, main_menu_kb
+from keyboards import (
+    back_to_main_kb,
+    channels_kb,
+    main_menu_kb,
+    posting_settings_kb,
+    sources_kb,
+)
 from post_worker import process_one_feed_job, run_post_worker_loop
 
 URL_ONE_LINE = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
 TG_LINK_RE = re.compile(r"^(?:https?://)?(?:t\.me/|telegram\.me/)?@?([A-Za-z0-9_]{5,})/?$", re.IGNORECASE)
+pending_action_by_user: dict[int, str] = {}
 
 
 def main_menu_text(name: str, *, key_hint: str) -> str:
@@ -55,8 +65,8 @@ async def render_sources_html(user_id: int) -> str:
             "Пока пусто.\n\n"
             "• Пришли <b>одной строкой</b> ссылку на <b>сайт</b> (https://…) — постараюсь "
             "найти RSS сам.\n"
-            "• Или укажи ленту явно: <code>/add_rss https://…/feed.xml</code>\n"
-            "• Привяжи ленту к каналу: <code>/link_rss N M</code> (номера из списков)"
+            "• Привязка к каналу пока делается через номер источника и номер канала "
+            "(добавим отдельные кнопки следующим шагом)."
         )
     lines: list[str] = ["<b>Мои источники информации</b>", ""]
     for r in rows:
@@ -73,10 +83,7 @@ async def render_sources_html(user_id: int) -> str:
             f"{st} <b>#{r['id']}</b> {title}\n<code>{url}</code>{ch_line}\n"
         )
     lines.append("")
-    lines.append(
-        "<code>/link_rss N M</code> — лента #N к каналу #M · "
-        "одна строка https — добавить · <code>/del_rss N</code> · <code>/rss_list</code>"
-    )
+    lines.append("Чтобы добавить источник, просто пришли ссылку на сайт одной строкой.")
     return "\n".join(lines)
 
 
@@ -86,8 +93,7 @@ async def render_channels_html(user_id: int, bot: Bot) -> str:
         return (
             "<b>Мои каналы</b>\n\n"
             "Пока пусто.\n\n"
-            "Добавь канал командой:\n"
-            "<code>/add_channel {ссылка на канал}</code>\n\n"
+            "Добавление каналов кнопками будет в этом разделе.\n\n"
             "<i>Перед этим добавь бота админом канала с правом публикации.</i>"
         )
 
@@ -106,10 +112,39 @@ async def render_channels_html(user_id: int, bot: Bot) -> str:
         lines.append(f"{status} <b>#{row['id']}</b> {title}\n<code>{chat_id}</code>\n")
 
     lines.append("")
-    lines.append(
-        "<code>/add_channel {ссылка}</code> · <code>/del_channel N</code> · <code>/channels</code>"
-    )
+    lines.append("Проверка прав бота в канале обновляется автоматически.")
     return "\n".join(lines)
+
+
+async def render_settings_html(user_id: int) -> str:
+    ps = await get_posting_settings(user_id)
+    daily = await get_daily_post_count(user_id)
+    max_d = int(ps["max_posts_per_day"])
+    on = "вкл" if ps["posting_enabled"] else "выкл"
+    im = "да" if ps["send_images"] else "нет"
+    qs, qe = ps["quiet_start_hour"], ps["quiet_end_hour"]
+    if qs is None or qe is None:
+        quiet_line = "выключены"
+    else:
+        quiet_line = f"{int(qs)}:00–{int(qe)}:00 (локальное время сервера)"
+    return (
+        "<b>Настройки постинга</b>\n\n"
+        f"Автопост: <b>{escape(on)}</b>\n"
+        f"Сегодня опубликовано: <b>{daily}</b> из <b>{max_d}</b> (лимит в сутки)\n"
+        f"Тихие часы: {escape(quiet_line)}\n"
+        f"Картинки из RSS: <b>{escape(im)}</b>\n\n"
+        "Управляй параметрами кнопками ниже."
+    )
+
+
+async def render_settings_kb(user_id: int):
+    ps = await get_posting_settings(user_id)
+    quiet_enabled = ps["quiet_start_hour"] is not None and ps["quiet_end_hour"] is not None
+    return posting_settings_kb(
+        posting_enabled=bool(ps["posting_enabled"]),
+        send_images=bool(ps["send_images"]),
+        quiet_enabled=bool(quiet_enabled),
+    )
 
 
 async def render_status_html(user_id: int, settings) -> str:
@@ -156,49 +191,15 @@ async def cmd_start(message: Message) -> None:
     )
 
 
-async def cmd_help(message: Message) -> None:
-    if message.from_user:
-        await ensure_user(message.from_user.id)
-    await message.answer(
-        "**Команды**\n"
-        "/start — главное меню\n"
-        "/help — эта справка\n"
-        "/add_channel `{ссылка на канал}` — добавить канал\n"
-        "/channels — список каналов\n"
-        "/del_channel `N` — удалить канал по номеру\n"
-        "/link_rss `N` `M` — привязать ленту #N к каналу #M\n"
-        "/post_once `N` — выложить одну новую запись из ленты #N в канал\n"
-        "/status — сводка по твоему аккаунту\n"
-        "/health — быстрая диагностика бота\n"
-        "Ссылка на сайт одной строкой (https://…) — найти ленту и добавить\n"
-        "/add_rss `URL` — добавить RSS/Atom вручную\n"
-        "/rss_list — список твоих лент\n"
-        "/del_rss `N` — удалить источник по номеру\n\n"
-        "**Меню**\n"
-        "• *Мои каналы* — подключённые каналы и статус бота в них\n"
-        "• *Мои источники* — RSS/ссылки, которые ты добавил\n"
-        "• *Статус* — сводка и предупреждения\n"
-        "• *Настройки постинга* — интервал, лимиты, картинки\n"
-        "• *Черновики и очередь* — предпросмотр и публикация\n"
-        "• *Помощь* — как подключить канал и RSS\n\n"
-        "**ИИ:** в `.env` задай `OPENAI_API_KEY`, при необходимости "
-        "`OPENAI_BASE_URL` и `OPENAI_MODEL`.",
-        parse_mode="Markdown",
-        reply_markup=main_menu_kb(),
-    )
-
-
-async def cmd_add_channel(message: Message, command: CommandObject, bot: Bot) -> None:
+async def add_channel_from_raw(message: Message, bot: Bot, raw: str) -> None:
     if not message.from_user:
         return
     await ensure_user(message.from_user.id)
-    raw = (command.args or "").strip()
+    raw = raw.strip()
     if not raw:
         await message.answer(
-            "Отправь команду в формате:\n"
-            "<code>/add_channel {ссылка на канал}</code>\n\n"
-            "Пример:\n"
-            "<code>/add_channel https://t.me/juvejuv191</code>",
+            "Пришли ссылку на канал или его числовой id.\n"
+            "Пример: <code>https://t.me/username</code>",
             parse_mode="HTML",
         )
         return
@@ -210,9 +211,8 @@ async def cmd_add_channel(message: Message, command: CommandObject, bot: Bot) ->
         m = TG_LINK_RE.match(raw)
         if not m:
             await message.answer(
-                "Формат не распознан. Используй:\n"
-                "<code>/add_channel {ссылка на канал}</code>\n"
-                "Например: <code>/add_channel https://t.me/username</code>",
+                "Формат не распознан. Пришли ссылку вида:\n"
+                "<code>https://t.me/username</code>",
                 parse_mode="HTML",
             )
             return
@@ -249,135 +249,6 @@ async def cmd_add_channel(message: Message, command: CommandObject, bot: Bot) ->
         parse_mode="HTML",
         reply_markup=main_menu_kb(),
     )
-
-
-async def cmd_channels(message: Message, bot: Bot) -> None:
-    if not message.from_user:
-        return
-    await ensure_user(message.from_user.id)
-    text = await render_channels_html(message.from_user.id, bot)
-    await message.answer(text, parse_mode="HTML", reply_markup=main_menu_kb())
-
-
-async def cmd_link_rss(message: Message, command: CommandObject) -> None:
-    if not message.from_user:
-        return
-    await ensure_user(message.from_user.id)
-    parts = (command.args or "").split()
-    if len(parts) != 2 or not all(p.isdigit() for p in parts):
-        await message.answer(
-            "Команда: <code>/link_rss N M</code>\n"
-            "N — номер источника в «Мои источники», M — номер канала в «Мои каналы».",
-            parse_mode="HTML",
-        )
-        return
-    rss_id, ch_id = int(parts[0]), int(parts[1])
-    ok = await set_rss_source_channel(
-        message.from_user.id,
-        rss_id=rss_id,
-        channel_id=ch_id,
-    )
-    if ok:
-        await message.answer(
-            f"Готово: источник #{rss_id} → канал #{ch_id}.",
-            reply_markup=main_menu_kb(),
-        )
-    else:
-        await message.answer(
-            "Не вышло — проверь номера # в списках и что канал твой.",
-        )
-
-
-async def cmd_post_once(message: Message, command: CommandObject, bot: Bot) -> None:
-    if not message.from_user:
-        return
-    await ensure_user(message.from_user.id)
-    arg = (command.args or "").strip()
-    if not arg.isdigit():
-        await message.answer(
-            "Укажи номер источника: <code>/post_once 1</code>",
-            parse_mode="HTML",
-        )
-        return
-    settings = load_settings()
-    if not settings.openai_api_key:
-        await message.answer(
-            "Нужен ключ ИИ в `.env`: <code>OPENAI_API_KEY</code>",
-            parse_mode="HTML",
-        )
-        return
-    jid = await get_feed_job_for_user(message.from_user.id, int(arg))
-    if not jid:
-        await message.answer(
-            "Источник не найден, не привязан к каналу или выключен. "
-            "Сначала <code>/link_rss N M</code>.",
-            parse_mode="HTML",
-        )
-        return
-    status = await message.answer("Публикую одну запись…")
-    try:
-        posted = await process_one_feed_job(bot, settings, jid)
-    except Exception as exc:  # noqa: BLE001
-        logging.exception("post_once failed")
-        await status.edit_text(f"Ошибка: <code>{escape(type(exc).__name__)}</code>", parse_mode="HTML")
-        return
-    if posted:
-        await status.edit_text("Готово — проверь канал.")
-    else:
-        await status.edit_text(
-            "Новых записей нет (всё уже опубликовано) или лента пуста."
-        )
-
-
-async def cmd_status(message: Message) -> None:
-    if not message.from_user:
-        return
-    await ensure_user(message.from_user.id)
-    settings = load_settings()
-    text = await render_status_html(message.from_user.id, settings)
-    await message.answer(text, parse_mode="HTML", reply_markup=main_menu_kb())
-
-
-async def cmd_health(message: Message, bot: Bot) -> None:
-    """Короткая проверка здоровья: Telegram, БД, ключ ИИ."""
-    checks: list[str] = []
-    try:
-        me = await bot.get_me()
-        checks.append(f"Telegram API: ✅ @{escape(me.username or 'bot')}")
-    except Exception as exc:  # noqa: BLE001
-        checks.append(f"Telegram API: ❌ <code>{escape(type(exc).__name__)}</code>")
-
-    try:
-        st = await get_user_stats(message.from_user.id if message.from_user else 0)
-        checks.append(
-            f"БД SQLite: ✅ каналы={st['channels']}, источники={st['sources']}, опубликовано={st['posted_entries']}"
-        )
-    except Exception as exc:  # noqa: BLE001
-        checks.append(f"БД SQLite: ❌ <code>{escape(type(exc).__name__)}</code>")
-
-    settings = load_settings()
-    if settings.openai_api_key:
-        checks.append("ИИ ключ: ✅ задан")
-    else:
-        checks.append("ИИ ключ: ❌ не задан")
-
-    checks.append(f"Интервал воркера: <code>{settings.poll_interval_sec}</code> с")
-    await message.answer("<b>Health Check</b>\n\n" + "\n".join(checks), parse_mode="HTML")
-
-
-async def cmd_del_channel(message: Message, command: CommandObject) -> None:
-    if not message.from_user:
-        return
-    await ensure_user(message.from_user.id)
-    arg = (command.args or "").strip()
-    if not arg.isdigit():
-        await message.answer("Укажи номер канала: <code>/del_channel 1</code>", parse_mode="HTML")
-        return
-    ok = await delete_channel(message.from_user.id, int(arg))
-    if ok:
-        await message.answer("Канал удалён.", reply_markup=main_menu_kb())
-    else:
-        await message.answer("Не нашёл такой номер или канал не твой.")
 
 
 async def run_add_feed_pipeline(message: Message, status: Message, raw: str) -> None:
@@ -422,24 +293,6 @@ async def run_add_feed_pipeline(message: Message, status: Message, raw: str) -> 
     )
 
 
-async def cmd_add_rss(message: Message, command: CommandObject) -> None:
-    if not message.from_user:
-        return
-    raw = (command.args or "").strip()
-    if not raw:
-        await message.answer(
-            "Укажи ссылку на сайт или на RSS, например:\n\n"
-            "<code>/add_rss https://example.com</code>\n"
-            "<code>/add_rss https://example.com/rss.xml</code>\n\n"
-            "Или просто пришли ссылку на сайт <b>одной строкой</b> без команды.",
-            parse_mode="HTML",
-        )
-        return
-
-    status = await message.answer("Ищу ленту…")
-    await run_add_feed_pipeline(message, status, raw)
-
-
 async def message_plain_url_as_source(message: Message) -> None:
     """Одна строка https://… — считаем попыткой добавить источник (раньше ответа ИИ)."""
     if not message.from_user or not message.text:
@@ -450,34 +303,80 @@ async def message_plain_url_as_source(message: Message) -> None:
     await run_add_feed_pipeline(message, status, raw)
 
 
-async def cmd_rss_list(message: Message) -> None:
-    if not message.from_user:
-        return
-    await ensure_user(message.from_user.id)
-    text = await render_sources_html(message.from_user.id)
-    await message.answer(text, parse_mode="HTML", reply_markup=main_menu_kb())
+async def handle_pending_action_input(message: Message, bot: Bot) -> bool:
+    if not message.from_user or not message.text:
+        return False
+    user_id = message.from_user.id
+    action = pending_action_by_user.get(user_id)
+    if not action:
+        return False
 
+    raw = message.text.strip()
 
-async def cmd_del_rss(message: Message, command: CommandObject) -> None:
-    if not message.from_user:
-        return
-    await ensure_user(message.from_user.id)
-    arg = (command.args or "").strip()
-    if not arg.isdigit():
+    if action == "add_channel":
+        pending_action_by_user.pop(user_id, None)
+        await add_channel_from_raw(message, bot, raw)
+        return True
+
+    if action == "add_source":
+        pending_action_by_user.pop(user_id, None)
+        status = await message.answer("Ищу ленту…")
+        await run_add_feed_pipeline(message, status, raw)
+        return True
+
+    if action == "del_channel":
+        if not raw.isdigit():
+            await message.answer("Нужен номер канала из списка, например: 2")
+            return True
+        pending_action_by_user.pop(user_id, None)
+        ok = await delete_channel(user_id, int(raw))
+        await message.answer("Канал удалён." if ok else "Не нашёл такой номер или канал не твой.")
+        return True
+
+    if action == "del_source":
+        if not raw.isdigit():
+            await message.answer("Нужен номер источника из списка, например: 3")
+            return True
+        pending_action_by_user.pop(user_id, None)
+        sid = int(raw)
+        ok = await delete_rss_source(user_id, sid)
+        await message.answer(f"Источник #{sid} удалён." if ok else "Не нашёл такой номер или он не твой.")
+        return True
+
+    if action == "link_source":
+        parts = raw.split()
+        if len(parts) != 2 or not all(p.isdigit() for p in parts):
+            await message.answer("Нужно два номера: сначала источник, потом канал. Пример: 4 2")
+            return True
+        pending_action_by_user.pop(user_id, None)
+        rss_id, ch_id = int(parts[0]), int(parts[1])
+        ok = await set_rss_source_channel(user_id, rss_id=rss_id, channel_id=ch_id)
         await message.answer(
-            "Укажи номер из списка, например: <code>/del_rss 2</code>",
-            parse_mode="HTML",
+            f"Готово: источник #{rss_id} → канал #{ch_id}."
+            if ok
+            else "Не вышло — проверь номера # в списках и что канал твой."
         )
-        return
-    sid = int(arg)
-    ok = await delete_rss_source(message.from_user.id, sid)
-    if ok:
-        await message.answer(
-            f"Источник #{sid} удалён.",
-            reply_markup=main_menu_kb(),
-        )
-    else:
-        await message.answer("Не нашёл такой номер или он не твой.")
+        return True
+
+    if action == "post_once":
+        if not raw.isdigit():
+            await message.answer("Нужен номер источника из списка, например: 1")
+            return True
+        pending_action_by_user.pop(user_id, None)
+        settings = load_settings()
+        if not settings.openai_api_key:
+            await message.answer("Нужен ключ ИИ в `.env`: OPENAI_API_KEY")
+            return True
+        jid = await get_feed_job_for_user(user_id, int(raw))
+        if not jid:
+            await message.answer("Источник не найден, не привязан к каналу или выключен.")
+            return True
+        status = await message.answer("Публикую одну запись…")
+        posted = await process_one_feed_job(bot, settings, jid, ignore_user_posting_rules=True)
+        await status.edit_text("Готово — проверь канал." if posted else "Новых записей нет или лента пуста.")
+        return True
+
+    return False
 
 
 async def ai_reply(message: Message, bot: Bot) -> None:
@@ -488,7 +387,7 @@ async def ai_reply(message: Message, bot: Bot) -> None:
         await message.answer(
             "Ключ ИИ не настроен. Добавь в `.env` строку:\n\n"
             "`OPENAI_API_KEY=sk-...`\n\n"
-            "Перезапусти бота или открой /start."
+            "Перезапусти бота и открой главное меню кнопкой."
         )
         return
 
@@ -520,6 +419,17 @@ async def ai_reply(message: Message, bot: Bot) -> None:
             chunk,
             reply_markup=main_menu_kb() if i == len(chunks) - 1 else None,
         )
+
+
+async def on_text_message(message: Message, bot: Bot) -> None:
+    if not message.text:
+        return
+    if await handle_pending_action_input(message, bot):
+        return
+    if URL_ONE_LINE.match(message.text.strip()):
+        await message_plain_url_as_source(message)
+        return
+    await ai_reply(message, bot)
 
 
 async def menu_router(callback: CallbackQuery) -> None:
@@ -557,7 +467,7 @@ async def menu_router(callback: CallbackQuery) -> None:
             return
         await ensure_user(callback.from_user.id)
         html = await render_channels_html(callback.from_user.id, callback.bot)
-        await callback.message.edit_text(html, parse_mode="HTML", reply_markup=back_to_main_kb())
+        await callback.message.edit_text(html, parse_mode="HTML", reply_markup=channels_kb())
         await callback.answer()
         return
 
@@ -570,7 +480,7 @@ async def menu_router(callback: CallbackQuery) -> None:
         await callback.message.edit_text(
             html,
             parse_mode="HTML",
-            reply_markup=back_to_main_kb(),
+            reply_markup=sources_kb(),
         )
         await callback.answer()
         return
@@ -590,13 +500,16 @@ async def menu_router(callback: CallbackQuery) -> None:
         return
 
     if action == "settings":
+        if not callback.from_user:
+            await callback.answer()
+            return
+        await ensure_user(callback.from_user.id)
+        html = await render_settings_html(callback.from_user.id)
+        kb = await render_settings_kb(callback.from_user.id)
         await callback.message.edit_text(
-            "**Настройки постинга**\n\n"
-            "Интервал или лимит постов в сутки, тихие часы, политика картинки "
-            "(с сайта / сгенерировать, если нет), текст без сторонних ссылок.\n\n"
-            "_Раздел в разработке._",
-            parse_mode="Markdown",
-            reply_markup=back_to_main_kb(),
+            html,
+            parse_mode="HTML",
+            reply_markup=kb,
         )
         await callback.answer()
         return
@@ -621,7 +534,7 @@ async def menu_router(callback: CallbackQuery) -> None:
             "4. Источники лучше добавлять как **RSS**: у многих СМИ есть ссылка на ленту "
             "раздела или главной страницы.\n\n"
             "Если что-то не работает — опиши в чате одним сообщением, постараюсь подсказать.\n\n"
-            "Команда /help — полная справка по меню.",
+            "Подробности и управление — через кнопки меню.",
             parse_mode="Markdown",
             reply_markup=back_to_main_kb(),
         )
@@ -629,6 +542,120 @@ async def menu_router(callback: CallbackQuery) -> None:
         return
 
     await callback.answer("Неизвестный раздел.")
+
+
+async def channels_router(callback: CallbackQuery) -> None:
+    if not callback.data or not callback.message or not callback.from_user:
+        return
+    await ensure_user(callback.from_user.id)
+    action = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    if action == "add":
+        pending_action_by_user[user_id] = "add_channel"
+        await callback.answer()
+        await callback.message.answer(
+            "Пришли ссылку на канал или его numeric id одним сообщением.\n"
+            "Пример: https://t.me/your_channel"
+        )
+        return
+    if action == "del":
+        pending_action_by_user[user_id] = "del_channel"
+        await callback.answer()
+        await callback.message.answer("Пришли номер канала # из списка в разделе «Мои каналы».")
+        return
+    await callback.answer()
+
+
+async def sources_router(callback: CallbackQuery) -> None:
+    if not callback.data or not callback.message or not callback.from_user:
+        return
+    await ensure_user(callback.from_user.id)
+    action = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    if action == "add":
+        pending_action_by_user[user_id] = "add_source"
+        await callback.answer()
+        await callback.message.answer("Пришли ссылку на сайт или RSS одной строкой.")
+        return
+    if action == "link":
+        pending_action_by_user[user_id] = "link_source"
+        await callback.answer()
+        await callback.message.answer(
+            "Пришли два номера через пробел: сначала источник, потом канал.\n"
+            "Пример: 4 2"
+        )
+        return
+    if action == "del":
+        pending_action_by_user[user_id] = "del_source"
+        await callback.answer()
+        await callback.message.answer("Пришли номер источника # из списка «Мои источники».")
+        return
+    if action == "post_once":
+        pending_action_by_user[user_id] = "post_once"
+        await callback.answer()
+        await callback.message.answer("Пришли номер источника # для публикации одной записи.")
+        return
+    await callback.answer()
+
+
+async def posting_settings_router(callback: CallbackQuery) -> None:
+    if not callback.data or not callback.message or not callback.from_user:
+        return
+    await ensure_user(callback.from_user.id)
+    parts = callback.data.split(":")
+    if len(parts) < 2 or parts[0] != "ps":
+        await callback.answer()
+        return
+
+    action = parts[1]
+    user_id = callback.from_user.id
+
+    if action == "toggle_posting":
+        ps = await get_posting_settings(user_id)
+        await update_posting_settings(user_id, posting_enabled=0 if ps["posting_enabled"] else 1)
+        await callback.answer("Автопост обновлён")
+    elif action == "toggle_images":
+        ps = await get_posting_settings(user_id)
+        await update_posting_settings(user_id, send_images=0 if ps["send_images"] else 1)
+        await callback.answer("Настройка картинок обновлена")
+    elif action == "max" and len(parts) == 3 and parts[2].isdigit():
+        n = int(parts[2])
+        if 1 <= n <= 500:
+            await update_posting_settings(user_id, max_posts_per_day=n)
+            await callback.answer(f"Лимит: {n}/день")
+        else:
+            await callback.answer("Недопустимый лимит")
+            return
+    elif action == "toggle_quiet":
+        ps = await get_posting_settings(user_id)
+        quiet_on = ps["quiet_start_hour"] is not None and ps["quiet_end_hour"] is not None
+        if quiet_on:
+            await update_posting_settings(user_id, quiet_start_hour=None, quiet_end_hour=None)
+            await callback.answer("Тихие часы выключены")
+        else:
+            await update_posting_settings(user_id, quiet_start_hour=22, quiet_end_hour=8)
+            await callback.answer("Тихие часы: 22:00-08:00")
+    elif action == "quiet" and len(parts) == 4 and parts[2].isdigit() and parts[3].isdigit():
+        a, b = int(parts[2]), int(parts[3])
+        if 0 <= a <= 23 and 0 <= b <= 23:
+            await update_posting_settings(user_id, quiet_start_hour=a, quiet_end_hour=b)
+            await callback.answer(f"Тихие часы: {a}:00-{b}:00")
+        else:
+            await callback.answer("Часы должны быть 0..23")
+            return
+    elif action == "refresh":
+        await callback.answer("Обновлено")
+    else:
+        await callback.answer()
+        return
+
+    html = await render_settings_html(user_id)
+    kb = await render_settings_kb(user_id)
+    await callback.message.edit_text(
+        html,
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
 
 
 async def main() -> None:
@@ -643,20 +670,11 @@ async def main() -> None:
     asyncio.create_task(run_post_worker_loop(bot))
 
     dp.message.register(cmd_start, CommandStart())
-    dp.message.register(cmd_help, Command("help"))
-    dp.message.register(cmd_add_channel, Command("add_channel"))
-    dp.message.register(cmd_channels, Command("channels"))
-    dp.message.register(cmd_del_channel, Command("del_channel"))
-    dp.message.register(cmd_link_rss, Command("link_rss"))
-    dp.message.register(cmd_post_once, Command("post_once"))
-    dp.message.register(cmd_status, Command("status"))
-    dp.message.register(cmd_health, Command("health"))
-    dp.message.register(cmd_add_rss, Command("add_rss"))
-    dp.message.register(cmd_rss_list, Command("rss_list"))
-    dp.message.register(cmd_del_rss, Command("del_rss"))
     dp.callback_query.register(menu_router, F.data.startswith("menu:"))
-    dp.message.register(message_plain_url_as_source, F.text.regexp(URL_ONE_LINE))
-    dp.message.register(ai_reply, F.text & ~F.text.startswith("/"))
+    dp.callback_query.register(channels_router, F.data.startswith("ch:"))
+    dp.callback_query.register(sources_router, F.data.startswith("src:"))
+    dp.callback_query.register(posting_settings_router, F.data.startswith("ps:"))
+    dp.message.register(on_text_message, F.text & ~F.text.startswith("/"))
 
     # Иначе Telegram отдаёт Conflict, если у бота остался webhook или второй процесс polling.
     await bot.delete_webhook(drop_pending_updates=True)
