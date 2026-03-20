@@ -73,7 +73,7 @@ async def render_channels_html(user_id: int, bot: Bot) -> str:
             "<b>Мои каналы</b>\n\n"
             "Пока пусто.\n\n"
             "Добавь канал командой:\n"
-            "<code>/add_channel -1001234567890</code>\n\n"
+            "<code>/add_channel {ссылка на канал}</code>\n\n"
             "<i>Перед этим добавь бота админом канала с правом публикации.</i>"
         )
 
@@ -121,7 +121,7 @@ async def cmd_help(message: Message) -> None:
         "**Команды**\n"
         "/start — главное меню\n"
         "/help — эта справка\n"
-        "/add_channel `-100... | @username | t.me/...` — добавить канал\n"
+        "/add_channel `{ссылка на канал}` — добавить канал\n"
         "/channels — список каналов\n"
         "/del_channel `N` — удалить канал по номеру\n"
         "Ссылка на сайт одной строкой (https://…) — найти ленту и добавить\n"
@@ -149,9 +149,9 @@ async def cmd_add_channel(message: Message, command: CommandObject, bot: Bot) ->
     raw = (command.args or "").strip()
     if not raw:
         await message.answer(
-            "Укажи ID или username канала, например:\n"
-            "<code>/add_channel -1001234567890</code>\n"
-            "<code>/add_channel @juvejuv191</code>\n"
+            "Отправь команду в формате:\n"
+            "<code>/add_channel {ссылка на канал}</code>\n\n"
+            "Пример:\n"
             "<code>/add_channel https://t.me/juvejuv191</code>",
             parse_mode="HTML",
         )
@@ -164,8 +164,9 @@ async def cmd_add_channel(message: Message, command: CommandObject, bot: Bot) ->
         m = TG_LINK_RE.match(raw)
         if not m:
             await message.answer(
-                "Формат не распознан. Используй <code>-100...</code>, <code>@username</code> "
-                "или <code>https://t.me/username</code>.",
+                "Формат не распознан. Используй:\n"
+                "<code>/add_channel {ссылка на канал}</code>\n"
+                "Например: <code>/add_channel https://t.me/username</code>",
                 parse_mode="HTML",
             )
             return
@@ -185,14 +186,13 @@ async def cmd_add_channel(message: Message, command: CommandObject, bot: Bot) ->
         else:
             await status.edit_text(
                 "Не могу открыть канал по ссылке/username.\n"
-                "Проверь, что username правильный и канал публичный, "
-                "или укажи ID вида <code>-100...</code>.",
+                "Проверь, что ссылка правильная и канал публичный.",
                 parse_mode="HTML",
             )
             return
 
     if chat_id is None:
-        await status.edit_text("Не удалось определить ID канала.")
+        await status.edit_text("Не удалось определить канал по ссылке.")
         return
 
     cid = await add_channel(message.from_user.id, chat_id=chat_id, title=title)
@@ -463,8 +463,7 @@ async def menu_router(callback: CallbackQuery) -> None:
             "**Помощь**\n\n"
             "1. Создай канал в Telegram (или возьми существующий).\n"
             "2. Добавь этого бота **администратором** канала с правом **публиковать сообщения**.\n"
-            "3. Узнай **ID канала** (например, через ботов вроде @getidsbot или пересланное "
-            "сообщение с канала — формат часто `-100…`).\n"
+            "3. Возьми ссылку канала вида <code>https://t.me/your_channel</code>.\n"
             "4. Источники лучше добавлять как **RSS**: у многих СМИ есть ссылка на ленту "
             "раздела или главной страницы.\n\n"
             "Если что-то не работает — опиши в чате одним сообщением, постараюсь подсказать.\n\n"
