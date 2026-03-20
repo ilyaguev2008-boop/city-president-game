@@ -9,6 +9,7 @@ import aiosqlite
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 
 from ai_service import complete_chat, split_for_telegram
@@ -27,16 +28,25 @@ from db import (
     init_db,
     list_channels,
     list_rss_sources,
+    mark_entry_posted,
     set_rss_source_channel,
     update_posting_settings,
 )
+from drafts_helpers import get_next_pending_item
 from feed_discovery import resolve_to_feed_preview
-from rss_service import try_normalize_http_url
+from rss_service import extract_feed_url_candidate
 from keyboards import (
     back_to_main_kb,
+    channel_delete_pick_kb,
     channels_kb,
+    draft_detail_kb,
+    drafts_list_kb,
+    link_pick_channel_kb,
+    link_pick_source_kb,
     main_menu_kb,
+    post_once_pick_kb,
     posting_settings_kb,
+    source_delete_pick_kb,
     sources_kb,
 )
 from post_worker import process_one_feed_job, run_post_worker_loop
@@ -47,16 +57,26 @@ pending_action_by_user: dict[int, str] = {}
 
 def looks_like_single_line_site_url(text: str) -> bool:
     """Одна строка, похожая на URL сайта или ленты (в т.ч. без https://)."""
-    t = (text or "").strip()
-    if not t or len(t) > 4000:
+    if not (text or "").strip() or len(text) > 4000:
         return False
-    if try_normalize_http_url(t) is None:
+    cand = extract_feed_url_candidate(text)
+    if not cand:
         return False
-    tl = t.lower()
+    tl = cand.lower()
     # Ссылки на Telegram-каналы обрабатываются в «Мои каналы», не как лента новостей.
     if "t.me/" in tl or "telegram.me/" in tl:
         return False
     return True
+
+
+async def _safe_edit_status(status: Message, text: str, **kwargs: object) -> None:
+    """Telegram падает с «message is not modified», если текст совпал с предыдущим."""
+    try:
+        await status.edit_text(text, **kwargs)
+    except TelegramBadRequest as e:
+        if "message is not modified" in (getattr(e, "message", "") or str(e)).lower():
+            return
+        raise
 
 
 def main_menu_text(name: str, *, key_hint: str) -> str:
@@ -79,8 +99,7 @@ async def render_sources_html(user_id: int) -> str:
             "Пока пусто.\n\n"
             "• Пришли <b>одной строкой</b> адрес сайта или ленты (в т.ч. без https://) — "
             "постараюсь найти ленту новостей сам.\n"
-            "• Привязка к каналу пока делается через номер источника новостей и номер канала "
-            "(добавим отдельные кнопки следующим шагом)."
+            "• Привязка к каналу — кнопка «Привязать к каналу»."
         )
     lines: list[str] = ["<b>Источники новостей</b>", ""]
     for r in rows:
@@ -99,6 +118,78 @@ async def render_sources_html(user_id: int) -> str:
     lines.append("")
     lines.append("Чтобы добавить источник новостей, пришли ссылку на сайт одной строкой.")
     return "\n".join(lines)
+
+
+def _truncate_plain(s: str, n: int) -> str:
+    t = (s or "").strip().replace("\n", " ")
+    if len(t) <= n:
+        return t
+    return t[: n - 1] + "…"
+
+
+def _linked_sources(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [r for r in rows if r.get("channel_id") and r["enabled"]]
+
+
+async def get_source_row(user_id: int, source_id: int) -> dict[str, object] | None:
+    rows = await list_rss_sources(user_id)
+    for r in rows:
+        if int(r["id"]) == source_id:
+            return r
+    return None
+
+
+async def render_drafts_list_html(user_id: int) -> str:
+    rows = await list_rss_sources(user_id)
+    linked = _linked_sources(rows)
+    if not linked:
+        return (
+            "<b>Черновики и очередь</b>\n\n"
+            "Нет привязанных источников. Сначала добавь канал и источник, "
+            "затем привяжи источник к каналу в разделе «Источники новостей»."
+        )
+    lines: list[str] = [
+        "<b>Черновики и очередь</b>",
+        "",
+        "Следующая запись по каждому источнику (ещё не в канале). "
+        "Нажми на строку ниже, чтобы открыть и опубликовать или пропустить.",
+        "",
+    ]
+    for r in linked:
+        sid = int(r["id"])
+        name = escape(str(r.get("feed_title") or "—"))
+        item = await get_next_pending_item(sid, str(r["url"]))
+        if not item:
+            lines.append(f"📌 <b>#{sid}</b> {name}\n<i>Новых записей нет.</i>\n")
+        else:
+            t = escape(_truncate_plain(item.title, 120))
+            lines.append(f"📌 <b>#{sid}</b> {name}\n<b>{t}</b>\n")
+    return "\n".join(lines)
+
+
+async def render_draft_detail_html(user_id: int, source_id: int) -> str:
+    row = await get_source_row(user_id, source_id)
+    if not row:
+        return "<b>Черновик</b>\n\nИсточник не найден."
+    if not row.get("channel_id"):
+        return "<b>Черновик</b>\n\nИсточник не привязан к каналу."
+    item = await get_next_pending_item(source_id, str(row["url"]))
+    name = escape(str(row.get("feed_title") or "—"))
+    ch_t = escape(str(row.get("channel_title") or ""))
+    if not item:
+        return (
+            f"<b>Черновик</b> · источник <b>#{source_id}</b> {name}\n"
+            f"→ канал: {ch_t}\n\n<i>Новых записей в ленте нет.</i>"
+        )
+    title = escape(item.title)
+    body = escape(_truncate_plain(item.body_text, 3500))
+    link = escape(item.link) if item.link else "—"
+    return (
+        f"<b>Черновик</b> · <b>#{source_id}</b> {name}\n"
+        f"→ канал: {ch_t}\n\n"
+        f"<b>{title}</b>\n\n{body}\n\n"
+        f"Ссылка: <code>{link}</code>"
+    )
 
 
 async def render_channels_html(user_id: int, bot: Bot) -> str:
@@ -265,22 +356,26 @@ async def run_add_feed_pipeline(message: Message, status: Message, raw: str) -> 
         return
     await ensure_user(message.from_user.id)
     raw = raw.strip()
-    await status.edit_text("Ищу ленту…")
+    # Не дублируем текст «Ищу ленту…» — иначе Telegram: message is not modified → падение.
+    await _safe_edit_status(status, "Проверяю ленту новостей…")
+    logging.info("feed add: user=%s url=%s", message.from_user.id, raw[:500])
     try:
         preview = await asyncio.wait_for(resolve_to_feed_preview(raw), timeout=75.0)
     except asyncio.TimeoutError:
-        await status.edit_text(
+        await _safe_edit_status(
+            status,
             "Слишком долго жду ответа сайта. Попробуй прямую ссылку на ленту "
             "(часто это …/feed/ или …/rss) или повтори позже.",
             parse_mode="HTML",
         )
         return
     except ValueError as exc:
-        await status.edit_text(f"Не получилось: {escape(str(exc))}", parse_mode="HTML")
+        await _safe_edit_status(status, f"Не получилось: {escape(str(exc))}", parse_mode="HTML")
         return
     except Exception as exc:  # noqa: BLE001
         logging.exception("Feed resolve failed")
-        await status.edit_text(
+        await _safe_edit_status(
+            status,
             f"Ошибка сети или сервера: <code>{escape(type(exc).__name__)}</code>",
             parse_mode="HTML",
         )
@@ -293,14 +388,15 @@ async def run_add_feed_pipeline(message: Message, status: Message, raw: str) -> 
             feed_title=preview.title,
         )
     except aiosqlite.IntegrityError:
-        await status.edit_text("Такой URL уже есть в твоём списке.")
+        await _safe_edit_status(status, "Такой URL уже есть в твоём списке.")
         return
 
     sample_lines = "\n".join(
         f"• {escape(t)}"
         for t, _ in preview.sample_entries[:3]
     )
-    await status.edit_text(
+    await _safe_edit_status(
+        status,
         f"Добавлено <b>#{sid}</b>: {escape(preview.title)}\n\n"
         f"Лента новостей: <code>{escape(preview.url)}</code>\n\n"
         f"Примеры записей:\n{sample_lines}",
@@ -314,9 +410,11 @@ async def message_plain_url_as_source(message: Message) -> None:
     if not message.from_user or not message.text:
         return
     await ensure_user(message.from_user.id)
-    raw = message.text.strip()
+    cand = extract_feed_url_candidate(message.text)
+    if not cand:
+        return
     status = await message.answer("Ищу ленту…")
-    await run_add_feed_pipeline(message, status, raw)
+    await run_add_feed_pipeline(message, status, cand)
 
 
 async def handle_pending_action_input(message: Message, bot: Bot) -> bool:
@@ -336,64 +434,9 @@ async def handle_pending_action_input(message: Message, bot: Bot) -> bool:
 
     if action == "add_source":
         pending_action_by_user.pop(user_id, None)
+        cand = extract_feed_url_candidate(raw) or raw.strip()
         status = await message.answer("Ищу ленту…")
-        await run_add_feed_pipeline(message, status, raw)
-        return True
-
-    if action == "del_channel":
-        if not raw.isdigit():
-            await message.answer("Нужен номер канала из списка, например: 2")
-            return True
-        pending_action_by_user.pop(user_id, None)
-        ok = await delete_channel(user_id, int(raw))
-        await message.answer("Канал удалён." if ok else "Не нашёл такой номер или канал не твой.")
-        return True
-
-    if action == "del_source":
-        if not raw.isdigit():
-            await message.answer("Нужен номер источника новостей из списка, например: 3")
-            return True
-        pending_action_by_user.pop(user_id, None)
-        sid = int(raw)
-        ok = await delete_rss_source(user_id, sid)
-        await message.answer(
-            f"Источник новостей #{sid} удалён." if ok else "Не нашёл такой номер или он не твой."
-        )
-        return True
-
-    if action == "link_source":
-        parts = raw.split()
-        if len(parts) != 2 or not all(p.isdigit() for p in parts):
-            await message.answer(
-                "Нужно два номера: сначала источник новостей, потом канал. Пример: 4 2"
-            )
-            return True
-        pending_action_by_user.pop(user_id, None)
-        rss_id, ch_id = int(parts[0]), int(parts[1])
-        ok = await set_rss_source_channel(user_id, rss_id=rss_id, channel_id=ch_id)
-        await message.answer(
-            f"Готово: источник новостей #{rss_id} → канал #{ch_id}."
-            if ok
-            else "Не вышло — проверь номера # в списках и что канал твой."
-        )
-        return True
-
-    if action == "post_once":
-        if not raw.isdigit():
-            await message.answer("Нужен номер источника новостей из списка, например: 1")
-            return True
-        pending_action_by_user.pop(user_id, None)
-        settings = load_settings()
-        if not settings.openai_api_key:
-            await message.answer("Нужен ключ ИИ в `.env`: OPENAI_API_KEY")
-            return True
-        jid = await get_feed_job_for_user(user_id, int(raw))
-        if not jid:
-            await message.answer("Источник новостей не найден, не привязан к каналу или выключен.")
-            return True
-        status = await message.answer("Публикую одну запись…")
-        posted = await process_one_feed_job(bot, settings, jid, ignore_user_posting_rules=True)
-        await status.edit_text("Готово — проверь канал." if posted else "Новых записей нет или лента пуста.")
+        await run_add_feed_pipeline(message, status, cand)
         return True
 
     return False
@@ -535,13 +578,15 @@ async def menu_router(callback: CallbackQuery) -> None:
         return
 
     if action == "drafts":
-        await callback.message.edit_text(
-            "**Черновики и очередь**\n\n"
-            "Предпросмотр следующего материала, «опубликовать сейчас», «пропустить».\n\n"
-            "_Раздел в разработке._",
-            parse_mode="Markdown",
-            reply_markup=back_to_main_kb(),
-        )
+        if not callback.from_user:
+            await callback.answer()
+            return
+        await ensure_user(callback.from_user.id)
+        html = await render_drafts_list_html(callback.from_user.id)
+        rows = await list_rss_sources(callback.from_user.id)
+        linked = _linked_sources(rows)
+        kb = drafts_list_kb(linked) if linked else back_to_main_kb()
+        await callback.message.edit_text(html, parse_mode="HTML", reply_markup=kb)
         await callback.answer()
         return
 
@@ -568,9 +613,10 @@ async def channels_router(callback: CallbackQuery) -> None:
     if not callback.data or not callback.message or not callback.from_user:
         return
     await ensure_user(callback.from_user.id)
-    action = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
-    if action == "add":
+    parts = (callback.data or "").split(":")
+
+    if len(parts) == 2 and parts[0] == "ch" and parts[1] == "add":
         pending_action_by_user[user_id] = "add_channel"
         await callback.answer()
         await callback.message.answer(
@@ -578,11 +624,28 @@ async def channels_router(callback: CallbackQuery) -> None:
             "Пример: https://t.me/your_channel"
         )
         return
-    if action == "del":
-        pending_action_by_user[user_id] = "del_channel"
+
+    if len(parts) == 2 and parts[0] == "ch" and parts[1] == "del":
+        rows = await list_channels(user_id)
+        if not rows:
+            await callback.answer("Нет каналов в списке", show_alert=True)
+            return
+        await callback.message.edit_text(
+            "<b>Удалить канал</b>\n\nВыбери канал:",
+            parse_mode="HTML",
+            reply_markup=channel_delete_pick_kb(rows),
+        )
         await callback.answer()
-        await callback.message.answer("Пришли номер канала # из списка в разделе «Мои каналы».")
         return
+
+    if len(parts) == 3 and parts[0] == "ch" and parts[1] == "x" and parts[2].isdigit():
+        cid = int(parts[2])
+        ok = await delete_channel(user_id, cid)
+        await callback.answer("Удалено" if ok else "Не вышло")
+        html = await render_channels_html(user_id, callback.bot)
+        await callback.message.edit_text(html, parse_mode="HTML", reply_markup=channels_kb())
+        return
+
     await callback.answer()
 
 
@@ -590,8 +653,13 @@ async def sources_router(callback: CallbackQuery) -> None:
     if not callback.data or not callback.message or not callback.from_user:
         return
     await ensure_user(callback.from_user.id)
-    action = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
+    parts = (callback.data or "").split(":", 1)
+    if len(parts) < 2 or parts[0] != "src":
+        await callback.answer()
+        return
+    action = parts[1]
+
     if action == "add":
         pending_action_by_user[user_id] = "add_source"
         await callback.answer()
@@ -599,28 +667,209 @@ async def sources_router(callback: CallbackQuery) -> None:
             "Пришли одной строкой ссылку на сайт или прямую ссылку на ленту новостей."
         )
         return
+
     if action == "link":
-        pending_action_by_user[user_id] = "link_source"
-        await callback.answer()
-        await callback.message.answer(
-            "Пришли два номера через пробел: сначала источник новостей, потом канал.\n"
-            "Пример: 4 2"
+        rows = await list_rss_sources(user_id)
+        unlinked = [r for r in rows if not r.get("channel_id")]
+        if not unlinked:
+            await callback.answer("Все источники уже привязаны", show_alert=True)
+            return
+        await callback.message.edit_text(
+            "<b>Привязать к каналу</b>\n\nВыбери источник новостей:",
+            parse_mode="HTML",
+            reply_markup=link_pick_source_kb(unlinked),
         )
+        await callback.answer()
         return
+
     if action == "del":
-        pending_action_by_user[user_id] = "del_source"
-        await callback.answer()
-        await callback.message.answer(
-            "Пришли номер источника новостей # из списка «Источники новостей»."
+        rows = await list_rss_sources(user_id)
+        if not rows:
+            await callback.answer("Нет источников", show_alert=True)
+            return
+        await callback.message.edit_text(
+            "<b>Удалить источник</b>\n\nВыбери из списка:",
+            parse_mode="HTML",
+            reply_markup=source_delete_pick_kb(rows),
         )
+        await callback.answer()
         return
+
     if action == "post_once":
-        pending_action_by_user[user_id] = "post_once"
+        rows = await list_rss_sources(user_id)
+        linked = _linked_sources(rows)
+        if not linked:
+            await callback.answer(
+                "Нет привязанных источников. Сначала привяжи источник к каналу.",
+                show_alert=True,
+            )
+            return
+        await callback.message.edit_text(
+            "<b>Опубликовать одну запись</b>\n\nВыбери источник:",
+            parse_mode="HTML",
+            reply_markup=post_once_pick_kb(linked),
+        )
         await callback.answer()
-        await callback.message.answer(
-            "Пришли номер источника новостей # для публикации одной записи."
+        return
+
+    await callback.answer()
+
+
+async def link_router(callback: CallbackQuery) -> None:
+    if not callback.data or not callback.message or not callback.from_user:
+        return
+    await ensure_user(callback.from_user.id)
+    user_id = callback.from_user.id
+    parts = (callback.data or "").split(":")
+
+    if len(parts) == 3 and parts[0] == "l" and parts[1] == "s" and parts[2].isdigit():
+        sid = int(parts[2])
+        row = await get_source_row(user_id, sid)
+        if not row or row.get("channel_id"):
+            await callback.answer("Источник недоступен", show_alert=True)
+            return
+        channels = await list_channels(user_id)
+        if not channels:
+            await callback.answer("Сначала добавь канал", show_alert=True)
+            return
+        await callback.message.edit_text(
+            f"<b>Привязка</b>\n\nВыбери канал для источника <b>#{sid}</b>:",
+            parse_mode="HTML",
+            reply_markup=link_pick_channel_kb(sid, channels),
+        )
+        await callback.answer()
+        return
+
+    if len(parts) == 4 and parts[0] == "l" and parts[1] == "c" and parts[2].isdigit() and parts[3].isdigit():
+        sid, cid = int(parts[2]), int(parts[3])
+        ok = await set_rss_source_channel(user_id, rss_id=sid, channel_id=cid)
+        await callback.answer("Готово" if ok else "Не вышло")
+        html = await render_sources_html(user_id)
+        await callback.message.edit_text(html, parse_mode="HTML", reply_markup=sources_kb())
+        return
+
+    await callback.answer()
+
+
+async def source_delete_router(callback: CallbackQuery) -> None:
+    if not callback.data or not callback.message or not callback.from_user:
+        return
+    await ensure_user(callback.from_user.id)
+    user_id = callback.from_user.id
+    parts = (callback.data or "").split(":")
+    if len(parts) != 2 or parts[0] != "sd" or not parts[1].isdigit():
+        await callback.answer()
+        return
+    sid = int(parts[1])
+    ok = await delete_rss_source(user_id, sid)
+    await callback.answer("Удалено" if ok else "Не вышло")
+    html = await render_sources_html(user_id)
+    await callback.message.edit_text(html, parse_mode="HTML", reply_markup=sources_kb())
+
+
+async def post_once_router(callback: CallbackQuery) -> None:
+    if not callback.data or not callback.message or not callback.from_user:
+        return
+    await ensure_user(callback.from_user.id)
+    user_id = callback.from_user.id
+    parts = (callback.data or "").split(":")
+    if len(parts) != 2 or parts[0] != "po" or not parts[1].isdigit():
+        await callback.answer()
+        return
+    sid = int(parts[1])
+    settings = load_settings()
+    if not settings.openai_api_key:
+        await callback.answer("Нет ключа ИИ в .env", show_alert=True)
+        return
+    jid = await get_feed_job_for_user(user_id, sid)
+    if not jid:
+        await callback.answer("Источник не привязан или выключен", show_alert=True)
+        return
+    await callback.answer("Публикую…")
+    status = await callback.message.answer("Публикую одну запись…")
+    try:
+        posted = await process_one_feed_job(
+            callback.bot, settings, jid, ignore_user_posting_rules=True
+        )
+    except Exception:  # noqa: BLE001
+        logging.exception("post_once from button")
+        await status.edit_text("Ошибка при публикации.")
+        return
+    await status.edit_text("Готово — проверь канал." if posted else "Новых записей нет или лента пуста.")
+    html = await render_sources_html(user_id)
+    await callback.message.edit_text(html, parse_mode="HTML", reply_markup=sources_kb())
+
+
+async def draft_router(callback: CallbackQuery) -> None:
+    if not callback.data or not callback.message or not callback.from_user:
+        return
+    await ensure_user(callback.from_user.id)
+    user_id = callback.from_user.id
+    parts = (callback.data or "").split(":")
+
+    if len(parts) == 3 and parts[0] == "d" and parts[1] == "v" and parts[2].isdigit():
+        sid = int(parts[2])
+        row = await get_source_row(user_id, sid)
+        if not row or not row.get("channel_id"):
+            await callback.answer("Нужна привязка к каналу", show_alert=True)
+            return
+        html = await render_draft_detail_html(user_id, sid)
+        await callback.message.edit_text(
+            html,
+            parse_mode="HTML",
+            reply_markup=draft_detail_kb(sid),
+        )
+        await callback.answer()
+        return
+
+    if len(parts) == 3 and parts[0] == "d" and parts[1] == "p" and parts[2].isdigit():
+        sid = int(parts[2])
+        settings = load_settings()
+        if not settings.openai_api_key:
+            await callback.answer("Нет ключа ИИ в .env", show_alert=True)
+            return
+        jid = await get_feed_job_for_user(user_id, sid)
+        if not jid:
+            await callback.answer("Источник не привязан", show_alert=True)
+            return
+        await callback.answer("Публикую…")
+        status = await callback.message.answer("Публикую в канал…")
+        try:
+            posted = await process_one_feed_job(
+                callback.bot, settings, jid, ignore_user_posting_rules=True
+            )
+        except Exception:  # noqa: BLE001
+            logging.exception("draft post")
+            await status.edit_text("Ошибка при публикации.")
+            return
+        await status.edit_text("Готово — проверь канал." if posted else "Новых записей нет.")
+        html = await render_drafts_list_html(user_id)
+        rows = await list_rss_sources(user_id)
+        linked = _linked_sources(rows)
+        kb = drafts_list_kb(linked) if linked else back_to_main_kb()
+        await callback.message.edit_text(html, parse_mode="HTML", reply_markup=kb)
+        return
+
+    if len(parts) == 3 and parts[0] == "d" and parts[1] == "k" and parts[2].isdigit():
+        sid = int(parts[2])
+        row = await get_source_row(user_id, sid)
+        if not row:
+            await callback.answer()
+            return
+        item = await get_next_pending_item(sid, str(row["url"]))
+        if not item:
+            await callback.answer("Нечего пропускать", show_alert=True)
+            return
+        await mark_entry_posted(sid, item.entry_key)
+        await callback.answer("Пропущено")
+        html = await render_draft_detail_html(user_id, sid)
+        await callback.message.edit_text(
+            html,
+            parse_mode="HTML",
+            reply_markup=draft_detail_kb(sid),
         )
         return
+
     await callback.answer()
 
 
@@ -696,6 +945,10 @@ async def main() -> None:
     asyncio.create_task(run_post_worker_loop(bot))
 
     dp.message.register(cmd_start, CommandStart())
+    dp.callback_query.register(draft_router, F.data.startswith("d:"))
+    dp.callback_query.register(link_router, F.data.startswith("l:"))
+    dp.callback_query.register(source_delete_router, F.data.startswith("sd:"))
+    dp.callback_query.register(post_once_router, F.data.startswith("po:"))
     dp.callback_query.register(menu_router, F.data.startswith("menu:"))
     dp.callback_query.register(channels_router, F.data.startswith("ch:"))
     dp.callback_query.register(sources_router, F.data.startswith("src:"))

@@ -1,6 +1,13 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
+def _btn_short(text: str, max_len: int = 42) -> str:
+    t = (text or "").replace("\n", " ").strip()
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1] + "…"
+
+
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -33,6 +40,24 @@ def channels_kb() -> InlineKeyboardMarkup:
     )
 
 
+def channel_delete_pick_kb(rows: list[dict[str, object]]) -> InlineKeyboardMarkup:
+    """rows: list_channels — id, title, chat_id."""
+    lines: list[list[InlineKeyboardButton]] = []
+    for r in rows:
+        sid = int(r["id"])
+        title = _btn_short(str(r.get("title") or "Без названия"), 36)
+        lines.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🗑 #{sid} · {title}",
+                    callback_data=f"ch:x:{sid}",
+                )
+            ]
+        )
+    lines.append([InlineKeyboardButton(text="« Назад", callback_data="menu:channels")])
+    return InlineKeyboardMarkup(inline_keyboard=lines)
+
+
 def sources_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -42,6 +67,84 @@ def sources_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Опубликовать 1 пост", callback_data="src:post_once")],
             [InlineKeyboardButton(text="Обновить список", callback_data="menu:sources")],
             [InlineKeyboardButton(text="« Главное меню", callback_data="menu:home")],
+        ]
+    )
+
+
+def link_pick_source_kb(unlinked: list[dict[str, object]]) -> InlineKeyboardMarkup:
+    lines: list[list[InlineKeyboardButton]] = []
+    for r in unlinked:
+        sid = int(r["id"])
+        title = _btn_short(str(r.get("feed_title") or "—"), 36)
+        lines.append(
+            [InlineKeyboardButton(text=f"#{sid} · {title}", callback_data=f"l:s:{sid}")]
+        )
+    lines.append([InlineKeyboardButton(text="« Назад", callback_data="menu:sources")])
+    return InlineKeyboardMarkup(inline_keyboard=lines)
+
+
+def link_pick_channel_kb(source_id: int, channels: list[dict[str, object]]) -> InlineKeyboardMarkup:
+    lines: list[list[InlineKeyboardButton]] = []
+    for ch in channels:
+        cid = int(ch["id"])
+        title = _btn_short(str(ch.get("title") or "Без названия"), 36)
+        lines.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Канал #{cid} · {title}",
+                    callback_data=f"l:c:{source_id}:{cid}",
+                )
+            ]
+        )
+    lines.append([InlineKeyboardButton(text="« Назад", callback_data="src:link")])
+    return InlineKeyboardMarkup(inline_keyboard=lines)
+
+
+def source_delete_pick_kb(rows: list[dict[str, object]]) -> InlineKeyboardMarkup:
+    lines: list[list[InlineKeyboardButton]] = []
+    for r in rows:
+        sid = int(r["id"])
+        title = _btn_short(str(r.get("feed_title") or "—"), 36)
+        lines.append(
+            [InlineKeyboardButton(text=f"🗑 #{sid} · {title}", callback_data=f"sd:{sid}")]
+        )
+    lines.append([InlineKeyboardButton(text="« Назад", callback_data="menu:sources")])
+    return InlineKeyboardMarkup(inline_keyboard=lines)
+
+
+def post_once_pick_kb(linked: list[dict[str, object]]) -> InlineKeyboardMarkup:
+    lines: list[list[InlineKeyboardButton]] = []
+    for r in linked:
+        sid = int(r["id"])
+        title = _btn_short(str(r.get("feed_title") or "—"), 36)
+        lines.append(
+            [InlineKeyboardButton(text=f"#{sid} · {title}", callback_data=f"po:{sid}")]
+        )
+    lines.append([InlineKeyboardButton(text="« Назад", callback_data="menu:sources")])
+    return InlineKeyboardMarkup(inline_keyboard=lines)
+
+
+def drafts_list_kb(linked: list[dict[str, object]]) -> InlineKeyboardMarkup:
+    lines: list[list[InlineKeyboardButton]] = []
+    for r in linked:
+        sid = int(r["id"])
+        title = _btn_short(str(r.get("feed_title") or "—"), 38)
+        lines.append(
+            [InlineKeyboardButton(text=f"📋 #{sid} · {title}", callback_data=f"d:v:{sid}")]
+        )
+    lines.append([InlineKeyboardButton(text="Обновить", callback_data="menu:drafts")])
+    lines.append([InlineKeyboardButton(text="« Главное меню", callback_data="menu:home")])
+    return InlineKeyboardMarkup(inline_keyboard=lines)
+
+
+def draft_detail_kb(source_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Опубликовать сейчас", callback_data=f"d:p:{source_id}"),
+                InlineKeyboardButton(text="Пропустить", callback_data=f"d:k:{source_id}"),
+            ],
+            [InlineKeyboardButton(text="« К списку черновиков", callback_data="menu:drafts")],
         ]
     )
 

@@ -53,6 +53,22 @@ def try_normalize_http_url(raw: str) -> str | None:
         return None
 
 
+def extract_feed_url_candidate(raw: str) -> str | None:
+    """
+    Первая строка сообщения, затем первый токен — чтобы сработало
+    «https://site.ru 👍» или «jufc.ru» в той же строке.
+    """
+    line = (raw or "").strip().split("\n")[0].strip()
+    if not line:
+        return None
+    first = line.split()[0]
+    if try_normalize_http_url(first):
+        return first
+    if try_normalize_http_url(line):
+        return line
+    return None
+
+
 def _download_url_bytes(url: str, *, timeout_sec: int = 12) -> tuple[str, bytes]:
     req = Request(
         url,
