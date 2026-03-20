@@ -19,12 +19,17 @@ from db import (
     delete_channel,
     delete_rss_source,
     ensure_user,
+    get_feed_job_for_user,
+    get_last_event_for_user,
+    get_user_stats,
     init_db,
     list_channels,
     list_rss_sources,
+    set_rss_source_channel,
 )
 from feed_discovery import resolve_to_feed_preview
 from keyboards import back_to_main_kb, main_menu_kb
+from post_worker import process_one_feed_job, run_post_worker_loop
 
 URL_ONE_LINE = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
 TG_LINK_RE = re.compile(r"^(?:https?://)?(?:t\.me/|telegram\.me/)?@?([A-Za-z0-9_]{5,})/?$", re.IGNORECASE)
@@ -50,18 +55,27 @@ async def render_sources_html(user_id: int) -> str:
             "Пока пусто.\n\n"
             "• Пришли <b>одной строкой</b> ссылку на <b>сайт</b> (https://…) — постараюсь "
             "найти RSS сам.\n"
-            "• Или укажи ленту явно: <code>/add_rss https://…/feed.xml</code>"
+            "• Или укажи ленту явно: <code>/add_rss https://…/feed.xml</code>\n"
+            "• Привяжи ленту к каналу: <code>/link_rss N M</code> (номера из списков)"
         )
     lines: list[str] = ["<b>Мои источники информации</b>", ""]
     for r in rows:
         st = "✅" if r["enabled"] else "⏸"
         title = escape(str(r["feed_title"] or "—"))
         url = escape(str(r["url"]))
-        lines.append(f"{st} <b>#{r['id']}</b> {title}\n<code>{url}</code>\n")
+        ch = r.get("channel_id")
+        ch_title = r.get("channel_title")
+        if ch:
+            ch_line = f" → канал <b>#{ch}</b> {escape(str(ch_title or ''))}"
+        else:
+            ch_line = " → <i>канал не привязан</i>"
+        lines.append(
+            f"{st} <b>#{r['id']}</b> {title}\n<code>{url}</code>{ch_line}\n"
+        )
     lines.append("")
     lines.append(
-        "Ссылка на сайт <b>одной строкой</b> в чат — добавить · "
-        "<code>/add_rss URL</code> · <code>/del_rss N</code> · <code>/rss_list</code>"
+        "<code>/link_rss N M</code> — лента #N к каналу #M · "
+        "одна строка https — добавить · <code>/del_rss N</code> · <code>/rss_list</code>"
     )
     return "\n".join(lines)
 
@@ -92,8 +106,36 @@ async def render_channels_html(user_id: int, bot: Bot) -> str:
         lines.append(f"{status} <b>#{row['id']}</b> {title}\n<code>{chat_id}</code>\n")
 
     lines.append("")
-    lines.append("<code>/add_channel ID</code> · <code>/del_channel N</code> · <code>/channels</code>")
+    lines.append(
+        "<code>/add_channel {ссылка}</code> · <code>/del_channel N</code> · <code>/channels</code>"
+    )
     return "\n".join(lines)
+
+
+async def render_status_html(user_id: int, settings) -> str:
+    st = await get_user_stats(user_id)
+    last = await get_last_event_for_user(user_id)
+    ai_ok = bool(settings.openai_api_key)
+    ai_line = "✅ ключ задан" if ai_ok else "❌ нет ключа — автопост и пересказ не работают"
+    if last:
+        icon = "✅" if str(last["level"]) == "info" else "⚠️"
+        last_line = (
+            f"{icon} {escape(str(last['kind']))}: {escape(str(last['message']))} "
+            f"(<code>{escape(str(last['created_at']))}</code>)"
+        )
+    else:
+        last_line = "—"
+    return (
+        "<b>Статус</b>\n\n"
+        f"Каналов: <b>{st['channels']}</b>\n"
+        f"Источников RSS: <b>{st['sources']}</b>\n"
+        f"Привязано к каналам: <b>{st['linked_sources']}</b>\n"
+        f"Уже опубликовано записей: <b>{st['posted_entries']}</b>\n\n"
+        f"ИИ: {ai_line}\n"
+        f"Интервал опроса RSS: <code>{settings.poll_interval_sec}</code> с "
+        "(<code>POLL_INTERVAL_SEC</code> в .env)\n\n"
+        f"Последнее событие: {last_line}"
+    )
 
 
 async def cmd_start(message: Message) -> None:
@@ -124,6 +166,10 @@ async def cmd_help(message: Message) -> None:
         "/add_channel `{ссылка на канал}` — добавить канал\n"
         "/channels — список каналов\n"
         "/del_channel `N` — удалить канал по номеру\n"
+        "/link_rss `N` `M` — привязать ленту #N к каналу #M\n"
+        "/post_once `N` — выложить одну новую запись из ленты #N в канал\n"
+        "/status — сводка по твоему аккаунту\n"
+        "/health — быстрая диагностика бота\n"
         "Ссылка на сайт одной строкой (https://…) — найти ленту и добавить\n"
         "/add_rss `URL` — добавить RSS/Atom вручную\n"
         "/rss_list — список твоих лент\n"
@@ -211,6 +257,112 @@ async def cmd_channels(message: Message, bot: Bot) -> None:
     await ensure_user(message.from_user.id)
     text = await render_channels_html(message.from_user.id, bot)
     await message.answer(text, parse_mode="HTML", reply_markup=main_menu_kb())
+
+
+async def cmd_link_rss(message: Message, command: CommandObject) -> None:
+    if not message.from_user:
+        return
+    await ensure_user(message.from_user.id)
+    parts = (command.args or "").split()
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        await message.answer(
+            "Команда: <code>/link_rss N M</code>\n"
+            "N — номер источника в «Мои источники», M — номер канала в «Мои каналы».",
+            parse_mode="HTML",
+        )
+        return
+    rss_id, ch_id = int(parts[0]), int(parts[1])
+    ok = await set_rss_source_channel(
+        message.from_user.id,
+        rss_id=rss_id,
+        channel_id=ch_id,
+    )
+    if ok:
+        await message.answer(
+            f"Готово: источник #{rss_id} → канал #{ch_id}.",
+            reply_markup=main_menu_kb(),
+        )
+    else:
+        await message.answer(
+            "Не вышло — проверь номера # в списках и что канал твой.",
+        )
+
+
+async def cmd_post_once(message: Message, command: CommandObject, bot: Bot) -> None:
+    if not message.from_user:
+        return
+    await ensure_user(message.from_user.id)
+    arg = (command.args or "").strip()
+    if not arg.isdigit():
+        await message.answer(
+            "Укажи номер источника: <code>/post_once 1</code>",
+            parse_mode="HTML",
+        )
+        return
+    settings = load_settings()
+    if not settings.openai_api_key:
+        await message.answer(
+            "Нужен ключ ИИ в `.env`: <code>OPENAI_API_KEY</code>",
+            parse_mode="HTML",
+        )
+        return
+    jid = await get_feed_job_for_user(message.from_user.id, int(arg))
+    if not jid:
+        await message.answer(
+            "Источник не найден, не привязан к каналу или выключен. "
+            "Сначала <code>/link_rss N M</code>.",
+            parse_mode="HTML",
+        )
+        return
+    status = await message.answer("Публикую одну запись…")
+    try:
+        posted = await process_one_feed_job(bot, settings, jid)
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("post_once failed")
+        await status.edit_text(f"Ошибка: <code>{escape(type(exc).__name__)}</code>", parse_mode="HTML")
+        return
+    if posted:
+        await status.edit_text("Готово — проверь канал.")
+    else:
+        await status.edit_text(
+            "Новых записей нет (всё уже опубликовано) или лента пуста."
+        )
+
+
+async def cmd_status(message: Message) -> None:
+    if not message.from_user:
+        return
+    await ensure_user(message.from_user.id)
+    settings = load_settings()
+    text = await render_status_html(message.from_user.id, settings)
+    await message.answer(text, parse_mode="HTML", reply_markup=main_menu_kb())
+
+
+async def cmd_health(message: Message, bot: Bot) -> None:
+    """Короткая проверка здоровья: Telegram, БД, ключ ИИ."""
+    checks: list[str] = []
+    try:
+        me = await bot.get_me()
+        checks.append(f"Telegram API: ✅ @{escape(me.username or 'bot')}")
+    except Exception as exc:  # noqa: BLE001
+        checks.append(f"Telegram API: ❌ <code>{escape(type(exc).__name__)}</code>")
+
+    try:
+        st = await get_user_stats(message.from_user.id if message.from_user else 0)
+        checks.append(
+            f"БД SQLite: ✅ каналы={st['channels']}, источники={st['sources']}, опубликовано={st['posted_entries']}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        checks.append(f"БД SQLite: ❌ <code>{escape(type(exc).__name__)}</code>")
+
+    settings = load_settings()
+    if settings.openai_api_key:
+        checks.append("ИИ ключ: ✅ задан")
+    else:
+        checks.append("ИИ ключ: ❌ не задан")
+
+    checks.append(f"Интервал воркера: <code>{settings.poll_interval_sec}</code> с")
+    await message.answer("<b>Health Check</b>\n\n" + "\n".join(checks), parse_mode="HTML")
 
 
 async def cmd_del_channel(message: Message, command: CommandObject) -> None:
@@ -424,12 +576,14 @@ async def menu_router(callback: CallbackQuery) -> None:
         return
 
     if action == "status":
+        if not callback.from_user:
+            await callback.answer()
+            return
+        await ensure_user(callback.from_user.id)
+        html = await render_status_html(callback.from_user.id, settings)
         await callback.message.edit_text(
-            "**Статус**\n\n"
-            "Здесь будет сводка: сколько каналов и активных источников, последний пост, "
-            "предупреждения (нет ключа ИИ, бот не админ в канале, источник не отвечает).\n\n"
-            "_Раздел в разработке._",
-            parse_mode="Markdown",
+            html,
+            parse_mode="HTML",
             reply_markup=back_to_main_kb(),
         )
         await callback.answer()
@@ -486,11 +640,17 @@ async def main() -> None:
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher(storage=MemoryStorage())
 
+    asyncio.create_task(run_post_worker_loop(bot))
+
     dp.message.register(cmd_start, CommandStart())
     dp.message.register(cmd_help, Command("help"))
     dp.message.register(cmd_add_channel, Command("add_channel"))
     dp.message.register(cmd_channels, Command("channels"))
     dp.message.register(cmd_del_channel, Command("del_channel"))
+    dp.message.register(cmd_link_rss, Command("link_rss"))
+    dp.message.register(cmd_post_once, Command("post_once"))
+    dp.message.register(cmd_status, Command("status"))
+    dp.message.register(cmd_health, Command("health"))
     dp.message.register(cmd_add_rss, Command("add_rss"))
     dp.message.register(cmd_rss_list, Command("rss_list"))
     dp.message.register(cmd_del_rss, Command("del_rss"))

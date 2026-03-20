@@ -8,6 +8,16 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
+NEWS_REWRITE_SYSTEM_RU = """Ты редактор новостей для Telegram-канала.
+
+Перескажи материал на русском языке для поста.
+
+Правила:
+- 2–4 коротких абзаца, без хэштегов и без заголовка уровня Markdown (#).
+- Не вставляй ссылки, URL и фразы вроде «читайте по ссылке».
+- Не выдумывай факты; если чего-то нет в тексте — не дополняй.
+- Сохраняй нейтральный тон новости."""
+
 SYSTEM_PROMPT_RU = """Ты дружелюбный AI-помощник для владельцев Telegram-каналов, которые используют бота автопостинга из своих источников (RSS и т.д.).
 
 Помогаешь с: подключением бота к каналу, правами администратора, поиском RSS-ленты у СМИ, настройкой сценариев постинга, пониманием работы разделов «Мои каналы», «Источники», «Черновики».
@@ -26,6 +36,7 @@ async def complete_chat(
     model: str,
     user_text: str,
     timeout_sec: int = 90,
+    system_prompt: str | None = None,
 ) -> str:
     """Вызывает Chat Completions API (OpenAI или совместимый сервер)."""
     url = base_url.rstrip("/") + "/v1/chat/completions"
@@ -33,10 +44,11 @@ async def complete_chat(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    system = system_prompt or SYSTEM_PROMPT_RU
     payload: dict[str, Any] = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT_RU},
+            {"role": "system", "content": system},
             {"role": "user", "content": user_text},
         ],
         "temperature": 0.7,
@@ -60,6 +72,27 @@ async def complete_chat(
             if not content:
                 raise RuntimeError("Нет текста в ответе")
             return str(content).strip()
+
+
+async def rewrite_news_ru(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    title: str,
+    body: str,
+    timeout_sec: int = 90,
+) -> str:
+    """Пересказ новости на русском для поста (без ссылок в тексте на стороне модели)."""
+    user_text = f"Заголовок:\n{title}\n\nТекст:\n{body[:12000]}"
+    return await complete_chat(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        user_text=user_text,
+        timeout_sec=timeout_sec,
+        system_prompt=NEWS_REWRITE_SYSTEM_RU,
+    )
 
 
 def split_for_telegram(text: str, max_len: int = 4000) -> list[str]:

@@ -46,10 +46,21 @@ CREATE TABLE IF NOT EXISTS posted_entries (
     UNIQUE (source_id, entry_key)
 );
 
+CREATE TABLE IF NOT EXISTS worker_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    source_id INTEGER,
+    level TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_channels_user ON channels (user_id);
 CREATE INDEX IF NOT EXISTS idx_rss_user ON rss_sources (user_id);
 CREATE INDEX IF NOT EXISTS idx_rss_channel ON rss_sources (channel_id);
 CREATE INDEX IF NOT EXISTS idx_posted_source ON posted_entries (source_id);
+CREATE INDEX IF NOT EXISTS idx_worker_events_user_created ON worker_events (user_id, created_at DESC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_user_url ON rss_sources (user_id, url);
 """
@@ -128,10 +139,12 @@ async def list_rss_sources(user_id: int) -> list[dict[str, object]]:
         await db.execute("PRAGMA foreign_keys = ON")
         cur = await db.execute(
             """
-            SELECT id, url, feed_title, enabled, channel_id, created_at
-            FROM rss_sources
-            WHERE user_id = ?
-            ORDER BY id DESC
+            SELECT rss.id, rss.url, rss.feed_title, rss.enabled, rss.channel_id, rss.created_at,
+                   ch.title AS channel_title
+            FROM rss_sources rss
+            LEFT JOIN channels ch ON ch.id = rss.channel_id
+            WHERE rss.user_id = ?
+            ORDER BY rss.id DESC
             """,
             (user_id,),
         )
@@ -144,6 +157,7 @@ async def list_rss_sources(user_id: int) -> list[dict[str, object]]:
             "enabled": bool(r[3]),
             "channel_id": r[4],
             "created_at": r[5],
+            "channel_title": r[6],
         }
         for r in rows
     ]
@@ -220,3 +234,180 @@ async def delete_channel(user_id: int, channel_id: int) -> bool:
         )
         await db.commit()
         return cur.rowcount > 0
+
+
+async def set_rss_source_channel(
+    user_id: int, *, rss_id: int, channel_id: int
+) -> bool:
+    """
+    Привязывает источник к каналу (оба id — внутренние из списков #).
+    Возвращает True, если строка обновлена.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            """
+            UPDATE rss_sources
+            SET channel_id = ?
+            WHERE id = ? AND user_id = ?
+              AND EXISTS (
+                SELECT 1 FROM channels c
+                WHERE c.id = ? AND c.user_id = ?
+              )
+            """,
+            (channel_id, rss_id, user_id, channel_id, user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def is_entry_posted(source_id: int, entry_key: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            "SELECT 1 FROM posted_entries WHERE source_id = ? AND entry_key = ?",
+            (source_id, entry_key),
+        )
+        row = await cur.fetchone()
+    return row is not None
+
+
+async def mark_entry_posted(source_id: int, entry_key: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            "INSERT OR IGNORE INTO posted_entries (source_id, entry_key) VALUES (?, ?)",
+            (source_id, entry_key),
+        )
+        await db.commit()
+
+
+async def add_worker_event(
+    *,
+    user_id: int | None,
+    source_id: int | None,
+    level: str,
+    kind: str,
+    message: str,
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            """
+            INSERT INTO worker_events (user_id, source_id, level, kind, message)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, source_id, level, kind, message[:1000]),
+        )
+        await db.commit()
+
+
+async def list_feeding_jobs() -> list[dict[str, object]]:
+    """Источники с привязанным каналом для фоновой публикации."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            """
+            SELECT rss_sources.id, rss_sources.user_id, rss_sources.url, channels.chat_id
+            FROM rss_sources
+            INNER JOIN channels ON channels.id = rss_sources.channel_id
+            WHERE rss_sources.enabled = 1
+            """,
+        )
+        rows = await cur.fetchall()
+    return [
+        {
+            "source_id": r[0],
+            "user_id": r[1],
+            "rss_url": r[2],
+            "chat_id": r[3],
+        }
+        for r in rows
+    ]
+
+
+async def get_feed_job_for_user(user_id: int, source_id: int) -> dict[str, object] | None:
+    """Один источник пользователя с привязанным каналом (для ручной публикации)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            """
+            SELECT rss_sources.id, rss_sources.user_id, rss_sources.url, channels.chat_id
+            FROM rss_sources
+            INNER JOIN channels ON channels.id = rss_sources.channel_id
+            WHERE rss_sources.enabled = 1
+              AND rss_sources.user_id = ?
+              AND rss_sources.id = ?
+            """,
+            (user_id, source_id),
+        )
+        row = await cur.fetchone()
+    if not row:
+        return None
+    return {
+        "source_id": row[0],
+        "user_id": row[1],
+        "rss_url": row[2],
+        "chat_id": row[3],
+    }
+
+
+async def get_user_stats(user_id: int) -> dict[str, int]:
+    """Сводка по пользователю для раздела «Статус»."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM channels WHERE user_id = ?", (user_id,)
+        )
+        n_ch = int((await cur.fetchone())[0])
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM rss_sources WHERE user_id = ?", (user_id,)
+        )
+        n_src = int((await cur.fetchone())[0])
+        cur = await db.execute(
+            """
+            SELECT COUNT(*) FROM rss_sources
+            WHERE user_id = ? AND channel_id IS NOT NULL AND enabled = 1
+            """,
+            (user_id,),
+        )
+        n_linked = int((await cur.fetchone())[0])
+        cur = await db.execute(
+            """
+            SELECT COUNT(*) FROM posted_entries pe
+            INNER JOIN rss_sources rs ON rs.id = pe.source_id
+            WHERE rs.user_id = ?
+            """,
+            (user_id,),
+        )
+        n_posted = int((await cur.fetchone())[0])
+    return {
+        "channels": n_ch,
+        "sources": n_src,
+        "linked_sources": n_linked,
+        "posted_entries": n_posted,
+    }
+
+
+async def get_last_event_for_user(user_id: int) -> dict[str, object] | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            """
+            SELECT level, kind, message, created_at
+            FROM worker_events
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = await cur.fetchone()
+    if not row:
+        return None
+    return {
+        "level": row[0],
+        "kind": row[1],
+        "message": row[2],
+        "created_at": row[3],
+    }
