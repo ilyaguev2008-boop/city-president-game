@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from html import escape
 
 import aiosqlite
@@ -13,14 +14,20 @@ from aiogram.types import CallbackQuery, Message
 from ai_service import complete_chat, split_for_telegram
 from config import load_settings
 from db import (
+    add_channel,
     add_rss_source,
+    delete_channel,
     delete_rss_source,
     ensure_user,
     init_db,
+    list_channels,
     list_rss_sources,
 )
+from feed_discovery import resolve_to_feed_preview
 from keyboards import back_to_main_kb, main_menu_kb
-from rss_service import fetch_feed
+
+URL_ONE_LINE = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
+TG_LINK_RE = re.compile(r"^(?:https?://)?(?:t\.me/|telegram\.me/)?@?([A-Za-z0-9_]{5,})/?$", re.IGNORECASE)
 
 
 def main_menu_text(name: str, *, key_hint: str) -> str:
@@ -28,7 +35,9 @@ def main_menu_text(name: str, *, key_hint: str) -> str:
         f"Привет, {name}!\n\n"
         "Это бот **автопостинга в Telegram-каналы**: материалы из **твоих** источников "
         "(лучше всего RSS), пересказ на русском, пост без лишних ссылок и с одной картинкой.\n\n"
-        "Выбери раздел ниже или напиши вопрос в чат — отвечу по настройке и работе бота."
+        "**Источник:** пришли в чат **одной строкой** ссылку на **сайт** (https://…) — бот "
+        "попробует найти ленту сам. Или выбери раздел «Мои источники».\n\n"
+        "Другой вопрос по боту — просто напиши текстом (не одной только ссылкой)."
         f"{key_hint}"
     )
 
@@ -38,9 +47,10 @@ async def render_sources_html(user_id: int) -> str:
     if not rows:
         return (
             "<b>Мои источники информации</b>\n\n"
-            "Пока пусто. Добавь RSS командой:\n"
-            "<code>/add_rss https://…/feed.xml</code>\n\n"
-            "<i>На многих сайтах есть ссылка на ленту раздела.</i>"
+            "Пока пусто.\n\n"
+            "• Пришли <b>одной строкой</b> ссылку на <b>сайт</b> (https://…) — постараюсь "
+            "найти RSS сам.\n"
+            "• Или укажи ленту явно: <code>/add_rss https://…/feed.xml</code>"
         )
     lines: list[str] = ["<b>Мои источники информации</b>", ""]
     for r in rows:
@@ -50,9 +60,39 @@ async def render_sources_html(user_id: int) -> str:
         lines.append(f"{st} <b>#{r['id']}</b> {title}\n<code>{url}</code>\n")
     lines.append("")
     lines.append(
-        "<code>/add_rss URL</code> — добавить · "
-        "<code>/del_rss N</code> — удалить · <code>/rss_list</code>"
+        "Ссылка на сайт <b>одной строкой</b> в чат — добавить · "
+        "<code>/add_rss URL</code> · <code>/del_rss N</code> · <code>/rss_list</code>"
     )
+    return "\n".join(lines)
+
+
+async def render_channels_html(user_id: int, bot: Bot) -> str:
+    rows = await list_channels(user_id)
+    if not rows:
+        return (
+            "<b>Мои каналы</b>\n\n"
+            "Пока пусто.\n\n"
+            "Добавь канал командой:\n"
+            "<code>/add_channel -1001234567890</code>\n\n"
+            "<i>Перед этим добавь бота админом канала с правом публикации.</i>"
+        )
+
+    lines: list[str] = ["<b>Мои каналы</b>", ""]
+    for row in rows:
+        chat_id = int(row["chat_id"])
+        title = escape(str(row["title"] or "Без названия"))
+        status = "⚪️"
+        try:
+            me = await bot.get_me()
+            member = await bot.get_chat_member(chat_id=chat_id, user_id=me.id)
+            can_post = bool(getattr(member, "can_post_messages", False))
+            status = "✅" if can_post else "⚠️"
+        except Exception:  # noqa: BLE001
+            status = "❌"
+        lines.append(f"{status} <b>#{row['id']}</b> {title}\n<code>{chat_id}</code>\n")
+
+    lines.append("")
+    lines.append("<code>/add_channel ID</code> · <code>/del_channel N</code> · <code>/channels</code>")
     return "\n".join(lines)
 
 
@@ -81,7 +121,11 @@ async def cmd_help(message: Message) -> None:
         "**Команды**\n"
         "/start — главное меню\n"
         "/help — эта справка\n"
-        "/add_rss `URL` — добавить RSS/Atom\n"
+        "/add_channel `-100... | @username | t.me/...` — добавить канал\n"
+        "/channels — список каналов\n"
+        "/del_channel `N` — удалить канал по номеру\n"
+        "Ссылка на сайт одной строкой (https://…) — найти ленту и добавить\n"
+        "/add_rss `URL` — добавить RSS/Atom вручную\n"
         "/rss_list — список твоих лент\n"
         "/del_rss `N` — удалить источник по номеру\n\n"
         "**Меню**\n"
@@ -98,27 +142,105 @@ async def cmd_help(message: Message) -> None:
     )
 
 
-async def cmd_add_rss(message: Message, command: CommandObject) -> None:
+async def cmd_add_channel(message: Message, command: CommandObject, bot: Bot) -> None:
     if not message.from_user:
         return
     await ensure_user(message.from_user.id)
     raw = (command.args or "").strip()
     if not raw:
         await message.answer(
-            "Укажи ссылку на RSS или Atom, например:\n\n"
-            "<code>/add_rss https://example.com/rss.xml</code>",
+            "Укажи ID или username канала, например:\n"
+            "<code>/add_channel -1001234567890</code>\n"
+            "<code>/add_channel @juvejuv191</code>\n"
+            "<code>/add_channel https://t.me/juvejuv191</code>",
             parse_mode="HTML",
         )
         return
 
-    status = await message.answer("Проверяю ленту…")
+    chat_ref: int | str
     try:
-        preview = await fetch_feed(raw)
+        chat_ref = int(raw)
+    except ValueError:
+        m = TG_LINK_RE.match(raw)
+        if not m:
+            await message.answer(
+                "Формат не распознан. Используй <code>-100...</code>, <code>@username</code> "
+                "или <code>https://t.me/username</code>.",
+                parse_mode="HTML",
+            )
+            return
+        chat_ref = f"@{m.group(1)}"
+
+    status = await message.answer("Сохраняю канал…")
+    title = None
+    chat_id: int | None = None
+    try:
+        chat = await bot.get_chat(chat_ref)
+        chat_id = int(chat.id)
+        title = getattr(chat, "title", None)
+    except Exception:  # noqa: BLE001
+        if isinstance(chat_ref, int):
+            # По числовому ID всё равно сохраняем; статус прав покажем в «Мои каналы».
+            chat_id = chat_ref
+        else:
+            await status.edit_text(
+                "Не могу открыть канал по ссылке/username.\n"
+                "Проверь, что username правильный и канал публичный, "
+                "или укажи ID вида <code>-100...</code>.",
+                parse_mode="HTML",
+            )
+            return
+
+    if chat_id is None:
+        await status.edit_text("Не удалось определить ID канала.")
+        return
+
+    cid = await add_channel(message.from_user.id, chat_id=chat_id, title=title)
+    await status.edit_text(
+        f"Канал добавлен: <b>#{cid}</b> {escape(str(title or 'Без названия'))}\n"
+        f"<code>{chat_id}</code>\n\n"
+        "Проверка прав бота отображается в разделе «Мои каналы».",
+        parse_mode="HTML",
+        reply_markup=main_menu_kb(),
+    )
+
+
+async def cmd_channels(message: Message, bot: Bot) -> None:
+    if not message.from_user:
+        return
+    await ensure_user(message.from_user.id)
+    text = await render_channels_html(message.from_user.id, bot)
+    await message.answer(text, parse_mode="HTML", reply_markup=main_menu_kb())
+
+
+async def cmd_del_channel(message: Message, command: CommandObject) -> None:
+    if not message.from_user:
+        return
+    await ensure_user(message.from_user.id)
+    arg = (command.args or "").strip()
+    if not arg.isdigit():
+        await message.answer("Укажи номер канала: <code>/del_channel 1</code>", parse_mode="HTML")
+        return
+    ok = await delete_channel(message.from_user.id, int(arg))
+    if ok:
+        await message.answer("Канал удалён.", reply_markup=main_menu_kb())
+    else:
+        await message.answer("Не нашёл такой номер или канал не твой.")
+
+
+async def run_add_feed_pipeline(message: Message, status: Message, raw: str) -> None:
+    if not message.from_user:
+        return
+    await ensure_user(message.from_user.id)
+    raw = raw.strip()
+    await status.edit_text("Ищу ленту…")
+    try:
+        preview = await resolve_to_feed_preview(raw)
     except ValueError as exc:
         await status.edit_text(f"Не получилось: {escape(str(exc))}", parse_mode="HTML")
         return
     except Exception as exc:  # noqa: BLE001
-        logging.exception("RSS fetch failed")
+        logging.exception("Feed resolve failed")
         await status.edit_text(
             f"Ошибка сети или сервера: <code>{escape(type(exc).__name__)}</code>",
             parse_mode="HTML",
@@ -141,10 +263,39 @@ async def cmd_add_rss(message: Message, command: CommandObject) -> None:
     )
     await status.edit_text(
         f"Добавлено <b>#{sid}</b>: {escape(preview.title)}\n\n"
+        f"Лента: <code>{escape(preview.url)}</code>\n\n"
         f"Примеры записей:\n{sample_lines}",
         parse_mode="HTML",
         reply_markup=main_menu_kb(),
     )
+
+
+async def cmd_add_rss(message: Message, command: CommandObject) -> None:
+    if not message.from_user:
+        return
+    raw = (command.args or "").strip()
+    if not raw:
+        await message.answer(
+            "Укажи ссылку на сайт или на RSS, например:\n\n"
+            "<code>/add_rss https://example.com</code>\n"
+            "<code>/add_rss https://example.com/rss.xml</code>\n\n"
+            "Или просто пришли ссылку на сайт <b>одной строкой</b> без команды.",
+            parse_mode="HTML",
+        )
+        return
+
+    status = await message.answer("Ищу ленту…")
+    await run_add_feed_pipeline(message, status, raw)
+
+
+async def message_plain_url_as_source(message: Message) -> None:
+    """Одна строка https://… — считаем попыткой добавить источник (раньше ответа ИИ)."""
+    if not message.from_user or not message.text:
+        return
+    await ensure_user(message.from_user.id)
+    raw = message.text.strip()
+    status = await message.answer("Ищу ленту…")
+    await run_add_feed_pipeline(message, status, raw)
 
 
 async def cmd_rss_list(message: Message) -> None:
@@ -249,14 +400,12 @@ async def menu_router(callback: CallbackQuery) -> None:
         return
 
     if action == "channels":
-        await callback.message.edit_text(
-            "**Мои каналы**\n\n"
-            "Здесь будет список каналов, привязанных к твоему аккаунту: имя, ID, "
-            "есть ли у бота право публиковать посты, последняя успешная публикация.\n\n"
-            "_Сейчас раздел в разработке: данные и действия появятся после подключения БД._",
-            parse_mode="Markdown",
-            reply_markup=back_to_main_kb(),
-        )
+        if not callback.from_user:
+            await callback.answer()
+            return
+        await ensure_user(callback.from_user.id)
+        html = await render_channels_html(callback.from_user.id, callback.bot)
+        await callback.message.edit_text(html, parse_mode="HTML", reply_markup=back_to_main_kb())
         await callback.answer()
         return
 
@@ -340,10 +489,14 @@ async def main() -> None:
 
     dp.message.register(cmd_start, CommandStart())
     dp.message.register(cmd_help, Command("help"))
+    dp.message.register(cmd_add_channel, Command("add_channel"))
+    dp.message.register(cmd_channels, Command("channels"))
+    dp.message.register(cmd_del_channel, Command("del_channel"))
     dp.message.register(cmd_add_rss, Command("add_rss"))
     dp.message.register(cmd_rss_list, Command("rss_list"))
     dp.message.register(cmd_del_rss, Command("del_rss"))
     dp.callback_query.register(menu_router, F.data.startswith("menu:"))
+    dp.message.register(message_plain_url_as_source, F.text.regexp(URL_ONE_LINE))
     dp.message.register(ai_reply, F.text & ~F.text.startswith("/"))
 
     # Иначе Telegram отдаёт Conflict, если у бота остался webhook или второй процесс polling.

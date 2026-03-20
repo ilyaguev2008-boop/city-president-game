@@ -159,3 +159,64 @@ async def delete_rss_source(user_id: int, source_id: int) -> bool:
         )
         await db.commit()
         return cur.rowcount > 0
+
+
+async def add_channel(user_id: int, *, chat_id: int, title: str | None = None) -> int:
+    """
+    Добавляет канал пользователю (или обновляет title у существующего).
+    Возвращает id записи channels.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            """
+            INSERT INTO channels (user_id, chat_id, title)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id, chat_id) DO UPDATE SET
+                title = excluded.title
+            """,
+            (user_id, chat_id, title),
+        )
+        cur = await db.execute(
+            "SELECT id FROM channels WHERE user_id = ? AND chat_id = ?",
+            (user_id, chat_id),
+        )
+        row = await cur.fetchone()
+        await db.commit()
+        return int(row[0])
+
+
+async def list_channels(user_id: int) -> list[dict[str, object]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            """
+            SELECT id, chat_id, title, created_at
+            FROM channels
+            WHERE user_id = ?
+            ORDER BY id DESC
+            """,
+            (user_id,),
+        )
+        rows = await cur.fetchall()
+    return [
+        {
+            "id": r[0],
+            "chat_id": r[1],
+            "title": r[2],
+            "created_at": r[3],
+        }
+        for r in rows
+    ]
+
+
+async def delete_channel(user_id: int, channel_id: int) -> bool:
+    """Удаляет канал по внутреннему id, если он принадлежит user_id."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            "DELETE FROM channels WHERE id = ? AND user_id = ?",
+            (channel_id, user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0

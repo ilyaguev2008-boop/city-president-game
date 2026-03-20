@@ -25,6 +25,19 @@ def _normalize_url(raw: str) -> str:
     return u
 
 
+def normalize_http_url(raw: str) -> str:
+    """Публичная обёртка для нормализации URL (сайт или лента)."""
+    return _normalize_url(raw)
+
+
+def try_fetch_feed_sync(url: str) -> FeedPreview | None:
+    """Пробует скачать ленту; при неудаче возвращает None (без исключения)."""
+    try:
+        return fetch_feed_sync(url)
+    except ValueError:
+        return None
+
+
 def fetch_feed_sync(url: str) -> FeedPreview:
     url = _normalize_url(url)
     parsed: Any = feedparser.parse(url)
