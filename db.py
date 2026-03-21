@@ -6,6 +6,8 @@ from pathlib import Path
 
 import aiosqlite
 
+from text_utils import normalize_article_link
+
 logger = logging.getLogger(__name__)
 
 DB_DIR = Path(__file__).resolve().parent / "data"
@@ -63,16 +65,31 @@ CREATE INDEX IF NOT EXISTS idx_rss_channel ON rss_sources (channel_id);
 CREATE INDEX IF NOT EXISTS idx_posted_source ON posted_entries (source_id);
 CREATE INDEX IF NOT EXISTS idx_worker_events_user_created ON worker_events (user_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS rss_monitor_state (
+    source_id INTEGER PRIMARY KEY REFERENCES rss_sources (id) ON DELETE CASCADE,
+    last_top_entry_key TEXT,
+    last_check_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_error TEXT
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_user_url ON rss_sources (user_id, url);
 
 CREATE TABLE IF NOT EXISTS user_posting_settings (
     user_id INTEGER PRIMARY KEY REFERENCES users (user_id) ON DELETE CASCADE,
     posting_enabled INTEGER NOT NULL DEFAULT 1 CHECK (posting_enabled IN (0, 1)),
+    posting_mode TEXT NOT NULL DEFAULT 'auto' CHECK (posting_mode IN ('manual', 'auto')),
     max_posts_per_day INTEGER NOT NULL DEFAULT 20,
     quiet_start_hour INTEGER,
     quiet_end_hour INTEGER,
     send_images INTEGER NOT NULL DEFAULT 1 CHECK (send_images IN (0, 1)),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS user_published_links (
+    user_id INTEGER NOT NULL REFERENCES users (user_id) ON DELETE CASCADE,
+    link_norm TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, link_norm)
 );
 
 CREATE TABLE IF NOT EXISTS user_daily_posts (
@@ -90,18 +107,53 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
     """Доп. поля/индексы для баз, созданных до обновления схемы."""
     cur = await conn.execute("PRAGMA table_info(rss_sources)")
     rows = await cur.fetchall()
-    if not rows:
-        return
-    cols = {row[1] for row in rows}
-    if "feed_title" not in cols:
-        await conn.execute("ALTER TABLE rss_sources ADD COLUMN feed_title TEXT")
-    cur2 = await conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_rss_user_url'"
-    )
-    if not await cur2.fetchone():
-        await conn.execute(
-            "CREATE UNIQUE INDEX idx_rss_user_url ON rss_sources (user_id, url)"
+    if rows:
+        cols = {row[1] for row in rows}
+        if "feed_title" not in cols:
+            await conn.execute("ALTER TABLE rss_sources ADD COLUMN feed_title TEXT")
+        cur2 = await conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_rss_user_url'"
         )
+        if not await cur2.fetchone():
+            await conn.execute(
+                "CREATE UNIQUE INDEX idx_rss_user_url ON rss_sources (user_id, url)"
+            )
+
+    cur_ups = await conn.execute("PRAGMA table_info(user_posting_settings)")
+    ups_rows = await cur_ups.fetchall()
+    ups_cols = {row[1] for row in ups_rows} if ups_rows else set()
+    if ups_cols and "posting_mode" not in ups_cols:
+        await conn.execute(
+            "ALTER TABLE user_posting_settings ADD COLUMN posting_mode TEXT NOT NULL DEFAULT 'auto'"
+        )
+        await conn.execute(
+            "UPDATE user_posting_settings SET posting_mode = 'manual' WHERE posting_enabled = 0"
+        )
+        await conn.execute(
+            "UPDATE user_posting_settings SET posting_mode = 'auto' WHERE posting_enabled = 1"
+        )
+
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_published_links (
+            user_id INTEGER NOT NULL REFERENCES users (user_id) ON DELETE CASCADE,
+            link_norm TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, link_norm)
+        )
+        """
+    )
+
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rss_monitor_state (
+            source_id INTEGER PRIMARY KEY REFERENCES rss_sources (id) ON DELETE CASCADE,
+            last_top_entry_key TEXT,
+            last_check_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_error TEXT
+        )
+        """
+    )
 
 
 async def init_db() -> None:
@@ -346,6 +398,68 @@ async def list_feeding_jobs() -> list[dict[str, object]]:
     ]
 
 
+async def list_rss_sources_for_monitor() -> list[dict[str, object]]:
+    """Все включённые источники — для фонового мониторинга лент (в т.ч. без канала и в ручном режиме)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            "SELECT id, user_id, url, feed_title FROM rss_sources WHERE enabled = 1",
+        )
+        rows = await cur.fetchall()
+    return [
+        {
+            "source_id": r[0],
+            "user_id": r[1],
+            "rss_url": r[2],
+            "feed_title": r[3],
+        }
+        for r in rows
+    ]
+
+
+async def get_rss_monitor_state(source_id: int) -> dict[str, object] | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            """
+            SELECT last_top_entry_key, last_check_at, last_error
+            FROM rss_monitor_state
+            WHERE source_id = ?
+            """,
+            (source_id,),
+        )
+        row = await cur.fetchone()
+    if not row:
+        return None
+    return {
+        "last_top_entry_key": row[0],
+        "last_check_at": row[1],
+        "last_error": row[2],
+    }
+
+
+async def upsert_rss_monitor_state(
+    source_id: int,
+    *,
+    last_top_entry_key: str | None,
+    last_error: str | None,
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            """
+            INSERT INTO rss_monitor_state (source_id, last_top_entry_key, last_check_at, last_error)
+            VALUES (?, ?, datetime('now'), ?)
+            ON CONFLICT(source_id) DO UPDATE SET
+                last_top_entry_key = excluded.last_top_entry_key,
+                last_check_at = datetime('now'),
+                last_error = excluded.last_error
+            """,
+            (source_id, last_top_entry_key, last_error),
+        )
+        await db.commit()
+
+
 async def get_feed_job_for_user(user_id: int, source_id: int) -> dict[str, object] | None:
     """Один источник пользователя с привязанным каналом (для ручной публикации)."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -425,7 +539,7 @@ async def get_posting_settings(user_id: int) -> dict[str, object]:
         await db.execute("PRAGMA foreign_keys = ON")
         cur = await db.execute(
             """
-            SELECT posting_enabled, max_posts_per_day, quiet_start_hour, quiet_end_hour, send_images
+            SELECT posting_enabled, posting_mode, max_posts_per_day, quiet_start_hour, quiet_end_hour, send_images
             FROM user_posting_settings
             WHERE user_id = ?
             """,
@@ -434,18 +548,26 @@ async def get_posting_settings(user_id: int) -> dict[str, object]:
         row = await cur.fetchone()
     if not row:
         raise RuntimeError("user_posting_settings row missing")
+    enabled = bool(row[0])
+    raw_mode = row[1]
+    if isinstance(raw_mode, str) and raw_mode in ("manual", "auto"):
+        mode = raw_mode
+    else:
+        mode = "auto" if enabled else "manual"
     return {
-        "posting_enabled": bool(row[0]),
-        "max_posts_per_day": int(row[1]),
-        "quiet_start_hour": row[2],
-        "quiet_end_hour": row[3],
-        "send_images": bool(row[4]),
+        "posting_enabled": enabled,
+        "posting_mode": mode,
+        "max_posts_per_day": int(row[2]),
+        "quiet_start_hour": row[3],
+        "quiet_end_hour": row[4],
+        "send_images": bool(row[5]),
     }
 
 
 async def update_posting_settings(user_id: int, **kwargs: object) -> None:
     allowed = {
         "posting_enabled",
+        "posting_mode",
         "max_posts_per_day",
         "quiet_start_hour",
         "quiet_end_hour",
@@ -456,6 +578,13 @@ async def update_posting_settings(user_id: int, **kwargs: object) -> None:
     bad = set(kwargs) - allowed
     if bad:
         raise ValueError(f"unknown keys: {bad}")
+    if "posting_mode" in kwargs:
+        pm = str(kwargs["posting_mode"])
+        if pm not in ("manual", "auto"):
+            raise ValueError("posting_mode must be 'manual' or 'auto'")
+        kwargs["posting_enabled"] = 1 if pm == "auto" else 0
+    elif "posting_enabled" in kwargs and "posting_mode" not in kwargs:
+        kwargs["posting_mode"] = "auto" if kwargs["posting_enabled"] else "manual"
     await ensure_posting_settings(user_id)
     cols = ", ".join(f"{k} = ?" for k in kwargs)
     vals = list(kwargs.values())
@@ -469,6 +598,37 @@ async def update_posting_settings(user_id: int, **kwargs: object) -> None:
             WHERE user_id = ?
             """,
             vals,
+        )
+        await db.commit()
+
+
+async def is_duplicate_article_for_user(user_id: int, link: str) -> bool:
+    """Проверка по нормализованной ссылке — одна и та же новость с разных источников."""
+    norm = normalize_article_link(link)
+    if not norm:
+        return False
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            "SELECT 1 FROM user_published_links WHERE user_id = ? AND link_norm = ?",
+            (user_id, norm),
+        )
+        return (await cur.fetchone()) is not None
+
+
+async def remember_published_article_link(user_id: int, link: str) -> None:
+    """Запоминаем ссылку после успешной публикации в канал."""
+    norm = normalize_article_link(link)
+    if not norm:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO user_published_links (user_id, link_norm)
+            VALUES (?, ?)
+            """,
+            (user_id, norm),
         )
         await db.commit()
 

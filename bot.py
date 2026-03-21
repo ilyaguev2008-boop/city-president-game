@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from ai_service import complete_chat, split_for_telegram
 from config import load_settings
@@ -26,15 +26,17 @@ from db import (
     get_posting_settings,
     get_user_stats,
     init_db,
+    is_duplicate_article_for_user,
+    is_entry_posted,
     list_channels,
     list_rss_sources,
     mark_entry_posted,
     set_rss_source_channel,
     update_posting_settings,
 )
-from drafts_helpers import get_next_pending_item
+from drafts_helpers import get_draft_suggestion
 from feed_discovery import resolve_to_feed_preview
-from rss_service import extract_feed_url_candidate
+from rss_service import extract_feed_url_candidate, normalize_http_url
 from keyboards import (
     back_to_main_kb,
     channel_delete_pick_kb,
@@ -50,9 +52,19 @@ from keyboards import (
     sources_kb,
 )
 from post_worker import process_one_feed_job, run_post_worker_loop
+from rss_monitor import run_rss_monitor_loop
 
 TG_LINK_RE = re.compile(r"^(?:https?://)?(?:t\.me/|telegram\.me/)?@?([A-Za-z0-9_]{5,})/?$", re.IGNORECASE)
 pending_action_by_user: dict[int, str] = {}
+# Что пользователь видит в «Черновике» — чтобы «Опубликовать» шло в тот же материал, а не в свежезагруженную ленту.
+draft_publish_target: dict[tuple[int, int], tuple[str, str, str]] = {}
+
+
+def _fallback_feed_title(norm_url: str) -> str:
+    from urllib.parse import urlparse
+
+    net = (urlparse(norm_url).netloc or "").split(":")[0]
+    return f"{net or 'Сайт'} — лента не найдена автоматически"
 
 
 def looks_like_single_line_site_url(text: str) -> bool:
@@ -151,45 +163,78 @@ async def render_drafts_list_html(user_id: int) -> str:
     lines: list[str] = [
         "<b>Черновики и очередь</b>",
         "",
-        "Следующая запись по каждому источнику (ещё не в канале). "
-        "Нажми на строку ниже, чтобы открыть и опубликовать или пропустить.",
+        "По каждому источнику показывается следующая <b>ещё не опубликованная</b> запись; "
+        "если в ленте всё уже было в канале — предлагается последняя сверху ленты "
+        "(можно снова опубликовать с пересказом). Нажми строку, чтобы открыть.",
         "",
     ]
     for r in linked:
         sid = int(r["id"])
         name = escape(str(r.get("feed_title") or "—"))
-        item = await get_next_pending_item(sid, str(r["url"]))
-        if not item:
-            lines.append(f"📌 <b>#{sid}</b> {name}\n<i>Новых записей нет.</i>\n")
+        sug = await get_draft_suggestion(sid, str(r["url"]))
+        if not sug:
+            lines.append(f"📌 <b>#{sid}</b> {name}\n<i>Лента пуста или недоступна.</i>\n")
+        elif sug.kind == "repeat":
+            t = escape(_truncate_plain(sug.item.title, 120))
+            lines.append(
+                f"📌 <b>#{sid}</b> {name}\n"
+                f"<i>Все свежие уже в канале — предложена последняя из ленты.</i>\n"
+                f"<b>{t}</b>\n"
+            )
         else:
-            t = escape(_truncate_plain(item.title, 120))
+            t = escape(_truncate_plain(sug.item.title, 120))
             lines.append(f"📌 <b>#{sid}</b> {name}\n<b>{t}</b>\n")
     return "\n".join(lines)
 
 
-async def render_draft_detail_html(user_id: int, source_id: int) -> str:
+async def compose_draft_detail(
+    user_id: int, source_id: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Текст черновика и клавиатура; одна выборка ленты на экран."""
     row = await get_source_row(user_id, source_id)
     if not row:
-        return "<b>Черновик</b>\n\nИсточник не найден."
+        return "<b>Черновик</b>\n\nИсточник не найден.", draft_detail_kb(source_id, can_skip=False)
     if not row.get("channel_id"):
-        return "<b>Черновик</b>\n\nИсточник не привязан к каналу."
-    item = await get_next_pending_item(source_id, str(row["url"]))
+        return (
+            "<b>Черновик</b>\n\nИсточник не привязан к каналу.",
+            draft_detail_kb(source_id, can_skip=False),
+        )
+    sug = await get_draft_suggestion(source_id, str(row["url"]))
     name = escape(str(row.get("feed_title") or "—"))
     ch_t = escape(str(row.get("channel_title") or ""))
-    if not item:
-        return (
+    if not sug:
+        html = (
             f"<b>Черновик</b> · источник <b>#{source_id}</b> {name}\n"
-            f"→ канал: {ch_t}\n\n<i>Новых записей в ленте нет.</i>"
+            f"→ канал: {ch_t}\n\n<i>Лента пуста или недоступна.</i>"
         )
-    title = escape(item.title)
-    body = escape(_truncate_plain(item.body_text, 3500))
-    link = escape(item.link) if item.link else "—"
-    return (
+        return html, draft_detail_kb(source_id, can_skip=False)
+    title = escape(sug.item.title)
+    body = escape(_truncate_plain(sug.item.body_text, 3500))
+    link = escape(sug.item.link) if sug.item.link else "—"
+    if sug.kind == "repeat":
+        note = (
+            "<i>Все материалы из ленты уже были в канале. "
+            "Ниже — последняя запись сверху ленты; можно снова опубликовать с пересказом.</i>\n\n"
+        )
+    else:
+        note = ""
+    html = (
         f"<b>Черновик</b> · <b>#{source_id}</b> {name}\n"
         f"→ канал: {ch_t}\n\n"
+        f"{note}"
         f"<b>{title}</b>\n\n{body}\n\n"
         f"Ссылка: <code>{link}</code>"
     )
+    draft_publish_target[(user_id, source_id)] = (
+        sug.item.entry_key,
+        sug.kind,
+        (sug.item.link or "").strip(),
+    )
+    kb = draft_detail_kb(
+        source_id,
+        can_skip=(sug.kind == "new"),
+    )
+    return html, kb
 
 
 async def render_channels_html(user_id: int, bot: Bot) -> str:
@@ -225,7 +270,12 @@ async def render_settings_html(user_id: int) -> str:
     ps = await get_posting_settings(user_id)
     daily = await get_daily_post_count(user_id)
     max_d = int(ps["max_posts_per_day"])
-    on = "вкл" if ps["posting_enabled"] else "выкл"
+    mode = str(ps.get("posting_mode") or ("auto" if ps["posting_enabled"] else "manual"))
+    mode_ru = (
+        "автоматический — бот сам публикует в канал"
+        if mode == "auto"
+        else "ручной — только черновики, публикация по кнопке «Опубликовать»"
+    )
     im = "да" if ps["send_images"] else "нет"
     qs, qe = ps["quiet_start_hour"], ps["quiet_end_hour"]
     if qs is None or qe is None:
@@ -234,10 +284,11 @@ async def render_settings_html(user_id: int) -> str:
         quiet_line = f"{int(qs)}:00–{int(qe)}:00 (локальное время сервера)"
     return (
         "<b>Настройки постинга</b>\n\n"
-        f"Автопост: <b>{escape(on)}</b>\n"
-        f"Сегодня опубликовано: <b>{daily}</b> из <b>{max_d}</b> (лимит в сутки)\n"
+        f"Режим: <b>{escape(mode_ru)}</b>\n"
+        f"Сегодня опубликовано: <b>{daily}</b> из <b>{max_d}</b> (лимит в сутки; в ручном режиме лимит тоже учитывается при публикации из черновиков)\n"
         f"Тихие часы: {escape(quiet_line)}\n"
-        f"Картинки из ленты новостей: <b>{escape(im)}</b>\n\n"
+        f"Картинки к постам (лента + страница статьи): <b>{escape(im)}</b>\n\n"
+        "Одинаковые новости по ссылке не дублируются между источниками.\n\n"
         "Управляй параметрами кнопками ниже."
     )
 
@@ -245,8 +296,9 @@ async def render_settings_html(user_id: int) -> str:
 async def render_settings_kb(user_id: int):
     ps = await get_posting_settings(user_id)
     quiet_enabled = ps["quiet_start_hour"] is not None and ps["quiet_end_hour"] is not None
+    mode = str(ps.get("posting_mode") or ("auto" if ps["posting_enabled"] else "manual"))
     return posting_settings_kb(
-        posting_enabled=bool(ps["posting_enabled"]),
+        posting_mode=mode,
         send_images=bool(ps["send_images"]),
         quiet_enabled=bool(quiet_enabled),
     )
@@ -269,6 +321,8 @@ async def render_status_html(user_id: int) -> str:
         f"Источников новостей: <b>{st['sources']}</b>\n"
         f"Привязано к каналам: <b>{st['linked_sources']}</b>\n"
         f"Уже опубликовано записей: <b>{st['posted_entries']}</b>\n\n"
+        "<i>Включённые источники периодически опрашиваются в фоне; при появлении новых "
+        "записей в ленте здесь может появиться событие <code>rss_fresh</code>.</i>\n\n"
         f"Последнее событие: {last_line}"
     )
 
@@ -359,25 +413,43 @@ async def run_add_feed_pipeline(message: Message, status: Message, raw: str) -> 
     # Не дублируем текст «Ищу ленту…» — иначе Telegram: message is not modified → падение.
     await _safe_edit_status(status, "Проверяю ленту новостей…")
     logging.info("feed add: user=%s url=%s", message.from_user.id, raw[:500])
+    preview = None
     try:
         preview = await asyncio.wait_for(resolve_to_feed_preview(raw), timeout=75.0)
-    except asyncio.TimeoutError:
-        await _safe_edit_status(
-            status,
-            "Слишком долго жду ответа сайта. Попробуй прямую ссылку на ленту "
-            "(часто это …/feed/ или …/rss) или повтори позже.",
-            parse_mode="HTML",
-        )
-        return
-    except ValueError as exc:
-        await _safe_edit_status(status, f"Не получилось: {escape(str(exc))}", parse_mode="HTML")
-        return
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:  # noqa: BLE001
-        logging.exception("Feed resolve failed")
+        logging.info("feed resolve failed (%s), fallback add: %s", type(exc).__name__, raw[:200])
+        try:
+            norm = normalize_http_url(raw)
+        except ValueError as ve:
+            await _safe_edit_status(
+                status,
+                f"Не получилось: {escape(str(ve))}",
+                parse_mode="HTML",
+            )
+            return
+        try:
+            sid = await add_rss_source(
+                message.from_user.id,
+                url=norm,
+                feed_title=_fallback_feed_title(norm),
+            )
+        except aiosqlite.IntegrityError:
+            await _safe_edit_status(status, "Такой URL уже есть в твоём списке.")
+            return
         await _safe_edit_status(
             status,
-            f"Ошибка сети или сервера: <code>{escape(type(exc).__name__)}</code>",
+            (
+                f"Источник <b>#{sid}</b> добавлен без проверки ленты.\n\n"
+                f"Адрес: <code>{escape(norm)}</code>\n\n"
+                "<i>Автоматически не удалось скачать RSS по этому URL "
+                "(сайт не ответил, нет типовой ленты или нужна другая ссылка). "
+                "Можно оставить как есть и позже прислать <b>прямую ссылку на .xml / rss</b> "
+                "новым источником, либо удалить этот и добавить снова.</i>"
+            ),
             parse_mode="HTML",
+            reply_markup=main_menu_kb(),
         )
         return
 
@@ -785,6 +857,10 @@ async def post_once_router(callback: CallbackQuery) -> None:
     if not jid:
         await callback.answer("Источник не привязан или выключен", show_alert=True)
         return
+    ps = await get_posting_settings(user_id)
+    if await get_daily_post_count(user_id) >= int(ps["max_posts_per_day"]):
+        await callback.answer("Достигнут лимит постов на сегодня", show_alert=True)
+        return
     await callback.answer("Публикую…")
     status = await callback.message.answer("Публикую одну запись…")
     try:
@@ -813,11 +889,11 @@ async def draft_router(callback: CallbackQuery) -> None:
         if not row or not row.get("channel_id"):
             await callback.answer("Нужна привязка к каналу", show_alert=True)
             return
-        html = await render_draft_detail_html(user_id, sid)
+        html, kb = await compose_draft_detail(user_id, sid)
         await callback.message.edit_text(
             html,
             parse_mode="HTML",
-            reply_markup=draft_detail_kb(sid),
+            reply_markup=kb,
         )
         await callback.answer()
         return
@@ -832,17 +908,59 @@ async def draft_router(callback: CallbackQuery) -> None:
         if not jid:
             await callback.answer("Источник не привязан", show_alert=True)
             return
+        ps = await get_posting_settings(user_id)
+        if await get_daily_post_count(user_id) >= int(ps["max_posts_per_day"]):
+            await callback.answer("Достигнут лимит постов на сегодня", show_alert=True)
+            return
+        row = await get_source_row(user_id, sid)
+        if not row:
+            await callback.answer("Источник не найден", show_alert=True)
+            return
+        target = draft_publish_target.get((user_id, sid))
+        if target:
+            entry_key, kind, item_link = target
+        else:
+            sug = await get_draft_suggestion(sid, str(row["url"]))
+            if not sug:
+                await callback.answer("Лента пуста или недоступна", show_alert=True)
+                return
+            entry_key = sug.item.entry_key
+            kind = sug.kind
+            item_link = (sug.item.link or "").strip()
+        # Тот же материал, что на экране; если автопост уже выложил эту запись — всё равно шлём пересказ снова.
+        posted_already = await is_entry_posted(sid, entry_key)
+        force_repost = kind == "repeat" or posted_already
+        if item_link and not force_repost and await is_duplicate_article_for_user(user_id, item_link):
+            await mark_entry_posted(sid, entry_key)
+            draft_publish_target.pop((user_id, sid), None)
+            await callback.answer(
+                "Эта новость уже публиковалась (совпала ссылка с другой публикацией).",
+                show_alert=True,
+            )
+            html = await render_drafts_list_html(user_id)
+            rows = await list_rss_sources(user_id)
+            linked = _linked_sources(rows)
+            kb = drafts_list_kb(linked) if linked else back_to_main_kb()
+            await callback.message.edit_text(html, parse_mode="HTML", reply_markup=kb)
+            return
         await callback.answer("Публикую…")
         status = await callback.message.answer("Публикую в канал…")
         try:
             posted = await process_one_feed_job(
-                callback.bot, settings, jid, ignore_user_posting_rules=True
+                callback.bot,
+                settings,
+                jid,
+                ignore_user_posting_rules=True,
+                only_entry_key=entry_key,
+                force_repost=force_repost,
             )
         except Exception:  # noqa: BLE001
             logging.exception("draft post")
             await status.edit_text("Ошибка при публикации.")
             return
-        await status.edit_text("Готово — проверь канал." if posted else "Новых записей нет.")
+        if posted:
+            draft_publish_target.pop((user_id, sid), None)
+        await status.edit_text("Готово — проверь канал." if posted else "Не удалось опубликовать (запись пропала из ленты или ошибка сети).")
         html = await render_drafts_list_html(user_id)
         rows = await list_rss_sources(user_id)
         linked = _linked_sources(rows)
@@ -856,17 +974,23 @@ async def draft_router(callback: CallbackQuery) -> None:
         if not row:
             await callback.answer()
             return
-        item = await get_next_pending_item(sid, str(row["url"]))
-        if not item:
+        sug = await get_draft_suggestion(sid, str(row["url"]))
+        if not sug:
             await callback.answer("Нечего пропускать", show_alert=True)
             return
-        await mark_entry_posted(sid, item.entry_key)
+        if sug.kind == "repeat":
+            await callback.answer(
+                "Все свежие уже в канале — пропуск не нужен. Можно опубликовать снова или дождаться новых в ленте.",
+                show_alert=True,
+            )
+            return
+        await mark_entry_posted(sid, sug.item.entry_key)
         await callback.answer("Пропущено")
-        html = await render_draft_detail_html(user_id, sid)
+        html, kb = await compose_draft_detail(user_id, sid)
         await callback.message.edit_text(
             html,
             parse_mode="HTML",
-            reply_markup=draft_detail_kb(sid),
+            reply_markup=kb,
         )
         return
 
@@ -885,10 +1009,9 @@ async def posting_settings_router(callback: CallbackQuery) -> None:
     action = parts[1]
     user_id = callback.from_user.id
 
-    if action == "toggle_posting":
-        ps = await get_posting_settings(user_id)
-        await update_posting_settings(user_id, posting_enabled=0 if ps["posting_enabled"] else 1)
-        await callback.answer("Автопост обновлён")
+    if action == "mode" and len(parts) == 3 and parts[2] in ("manual", "auto"):
+        await update_posting_settings(user_id, posting_mode=parts[2])
+        await callback.answer("Режим сохранён")
     elif action == "toggle_images":
         ps = await get_posting_settings(user_id)
         await update_posting_settings(user_id, send_images=0 if ps["send_images"] else 1)
@@ -943,6 +1066,7 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
 
     asyncio.create_task(run_post_worker_loop(bot))
+    asyncio.create_task(run_rss_monitor_loop(bot))
 
     dp.message.register(cmd_start, CommandStart())
     dp.callback_query.register(draft_router, F.data.startswith("d:"))

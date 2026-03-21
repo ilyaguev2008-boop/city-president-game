@@ -12,7 +12,7 @@ from rss_service import FeedPreview, try_fetch_feed_sync, normalize_http_url
 logger = logging.getLogger(__name__)
 
 # Ограничиваем перебор: иначе при «тугом» сайте можно ждать минуты.
-MAX_FEED_CANDIDATES = 14
+MAX_FEED_CANDIDATES = 22
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -94,9 +94,25 @@ async def _build_candidates(page_url: str) -> list[str]:
 
     parsed = urlparse(final)
     origin = f"{parsed.scheme}://{parsed.netloc}/"
-    for i, path in enumerate(
-        ("feed", "rss", "rss.xml", "feed.xml", "atom.xml", "feeds/all.rss", "index.xml")
-    ):
+    common_paths = (
+        "feed",
+        "?feed=rss2",
+        "?feed=atom",
+        "rss",
+        "rss.xml",
+        "feed.xml",
+        "atom.xml",
+        "feeds/all.rss",
+        "index.xml",
+        "feed/rss",
+        "feed/atom",
+        "blog/feed",
+        "news/feed",
+        "feeds/posts/default",
+        "comments/feed",
+        "category/news/feed",
+    )
+    for i, path in enumerate(common_paths):
         pairs.append((4 + i, urljoin(origin, path)))
 
     pairs.append((40, final))

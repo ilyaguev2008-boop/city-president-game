@@ -137,13 +137,19 @@ def drafts_list_kb(linked: list[dict[str, object]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=lines)
 
 
-def draft_detail_kb(source_id: int) -> InlineKeyboardMarkup:
+def draft_detail_kb(
+    source_id: int,
+    *,
+    can_skip: bool = True,
+) -> InlineKeyboardMarkup:
+    row1: list[InlineKeyboardButton] = [
+        InlineKeyboardButton(text="Опубликовать", callback_data=f"d:p:{source_id}"),
+    ]
+    if can_skip:
+        row1.append(InlineKeyboardButton(text="Пропустить", callback_data=f"d:k:{source_id}"))
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Опубликовать сейчас", callback_data=f"d:p:{source_id}"),
-                InlineKeyboardButton(text="Пропустить", callback_data=f"d:k:{source_id}"),
-            ],
+            row1,
             [InlineKeyboardButton(text="« К списку черновиков", callback_data="menu:drafts")],
         ]
     )
@@ -151,17 +157,24 @@ def draft_detail_kb(source_id: int) -> InlineKeyboardMarkup:
 
 def posting_settings_kb(
     *,
-    posting_enabled: bool,
+    posting_mode: str,
     send_images: bool,
     quiet_enabled: bool,
 ) -> InlineKeyboardMarkup:
+    auto_on = posting_mode == "auto"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"Автопост: {'ON' if posting_enabled else 'OFF'}",
-                    callback_data="ps:toggle_posting",
+                    text=f"Ручной{' ✓' if not auto_on else ''}",
+                    callback_data="ps:mode:manual",
                 ),
+                InlineKeyboardButton(
+                    text=f"Авто{' ✓' if auto_on else ''}",
+                    callback_data="ps:mode:auto",
+                ),
+            ],
+            [
                 InlineKeyboardButton(
                     text=f"Картинки: {'ON' if send_images else 'OFF'}",
                     callback_data="ps:toggle_images",

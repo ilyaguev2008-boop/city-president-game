@@ -12,6 +12,7 @@ class Settings:
     openai_base_url: str
     openai_model: str
     poll_interval_sec: int
+    rss_monitor_interval_sec: int
 
 
 def _load_dotenv_if_exists(path: Path) -> None:
@@ -41,10 +42,16 @@ def load_settings() -> Settings:
     except ValueError:
         poll_interval_sec = 300
 
+    mon_raw = os.getenv("RSS_MONITOR_INTERVAL_SEC", "90").strip()
+    try:
+        rss_monitor_interval_sec = max(30, int(mon_raw))
+    except ValueError:
+        rss_monitor_interval_sec = 90
+
     if not token:
         raise RuntimeError(
             "BOT_TOKEN is not set. Создай .env рядом с bot.py/config.py "
-            "и добавь строку BOT_TOKEN=123:ABC..."
+                "и добавь строку BOT_TOKEN=123:ABC..."
         )
 
     return Settings(
@@ -53,4 +60,5 @@ def load_settings() -> Settings:
         openai_base_url=openai_base_url or "https://api.openai.com",
         openai_model=openai_model or "gpt-4o-mini",
         poll_interval_sec=poll_interval_sec,
+        rss_monitor_interval_sec=rss_monitor_interval_sec,
     )
