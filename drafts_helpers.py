@@ -15,6 +15,14 @@ class DraftSuggestion:
     kind: Literal["new", "repeat"]
 
 
+@dataclass(frozen=True)
+class DraftPublishSnapshot:
+    """Снимок записи на момент показа черновика — чтобы опубликовать, даже если запись уже нет в свежем парсе ленты."""
+
+    item: FeedItem
+    kind: Literal["new", "repeat"]
+
+
 async def get_draft_suggestion(source_id: int, rss_url: str) -> DraftSuggestion | None:
     """
     Сначала — первая запись ленты, которой ещё нет в posted_entries.

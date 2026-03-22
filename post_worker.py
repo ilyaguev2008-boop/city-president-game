@@ -35,6 +35,7 @@ async def process_one_feed_job(
     ignore_user_posting_rules: bool = False,
     only_entry_key: str | None = None,
     force_repost: bool = False,
+    fallback_feed_item: FeedItem | None = None,
 ) -> bool:
     source_id = int(job["source_id"])
     user_id = int(job["user_id"])
@@ -45,6 +46,9 @@ async def process_one_feed_job(
     if not ignore_user_posting_rules:
         # Ручной режим: воркер не публикует в канал — только черновики в боте.
         if ps.get("posting_mode") == "manual":
+            return False
+        # По умолчанию автопост в канал выключен (см. ALLOW_AUTO_POSTING в .env).
+        if not settings.allow_auto_posting:
             return False
         if not ps["posting_enabled"]:
             return False
@@ -87,17 +91,30 @@ async def process_one_feed_job(
         items = await parse_feed_entries(rss_url)
     except Exception:
         logger.exception("Ошибка чтения ленты source_id=%s", source_id)
-        await add_worker_event(
-            user_id=user_id,
-            source_id=source_id,
-            level="error",
-            kind="rss_read",
-            message="Ошибка чтения ленты новостей",
-        )
-        return False
+        if not (
+            fallback_feed_item is not None
+            and only_entry_key is not None
+            and fallback_feed_item.entry_key == only_entry_key
+        ):
+            await add_worker_event(
+                user_id=user_id,
+                source_id=source_id,
+                level="error",
+                kind="rss_read",
+                message="Ошибка чтения ленты новостей",
+            )
+            return False
+        items = [fallback_feed_item]
 
     if not items:
-        return False
+        if (
+            fallback_feed_item is not None
+            and only_entry_key is not None
+            and fallback_feed_item.entry_key == only_entry_key
+        ):
+            items = [fallback_feed_item]
+        else:
+            return False
 
     return await _publish_feed_item(
         bot,
@@ -107,6 +124,7 @@ async def process_one_feed_job(
         send_images=send_images,
         only_entry_key=only_entry_key,
         force_repost=force_repost,
+        fallback_feed_item=fallback_feed_item,
     )
 
 
@@ -119,6 +137,7 @@ async def _publish_feed_item(
     send_images: bool,
     only_entry_key: str | None,
     force_repost: bool,
+    fallback_feed_item: FeedItem | None = None,
 ) -> bool:
     source_id = int(job["source_id"])
     user_id = int(job["user_id"])
@@ -127,7 +146,13 @@ async def _publish_feed_item(
     if only_entry_key is not None:
         item = next((i for i in items if i.entry_key == only_entry_key), None)
         if item is None:
-            return False
+            if (
+                fallback_feed_item is not None
+                and fallback_feed_item.entry_key == only_entry_key
+            ):
+                item = fallback_feed_item
+            else:
+                return False
         if await is_entry_posted(source_id, item.entry_key) and not force_repost:
             return False
     else:

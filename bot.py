@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup
 
 from ai_service import complete_chat, split_for_telegram
 from config import load_settings
@@ -34,22 +34,21 @@ from db import (
     set_rss_source_channel,
     update_posting_settings,
 )
-from drafts_helpers import get_draft_suggestion
+from drafts_helpers import DraftPublishSnapshot, get_draft_suggestion
 from feed_discovery import resolve_to_feed_preview
 from rss_service import extract_feed_url_candidate, normalize_http_url
 from keyboards import (
-    back_to_main_kb,
     channel_delete_pick_kb,
-    channels_kb,
+    channels_reply_kb,
     draft_detail_kb,
     drafts_list_kb,
     link_pick_channel_kb,
     link_pick_source_kb,
-    main_menu_kb,
+    main_menu_reply_kb,
     post_once_pick_kb,
     posting_settings_kb,
     source_delete_pick_kb,
-    sources_kb,
+    sources_reply_kb,
 )
 from post_worker import process_one_feed_job, run_post_worker_loop
 from rss_monitor import run_rss_monitor_loop
@@ -57,7 +56,7 @@ from rss_monitor import run_rss_monitor_loop
 TG_LINK_RE = re.compile(r"^(?:https?://)?(?:t\.me/|telegram\.me/)?@?([A-Za-z0-9_]{5,})/?$", re.IGNORECASE)
 pending_action_by_user: dict[int, str] = {}
 # Что пользователь видит в «Черновике» — чтобы «Опубликовать» шло в тот же материал, а не в свежезагруженную ленту.
-draft_publish_target: dict[tuple[int, int], tuple[str, str, str]] = {}
+draft_publish_target: dict[tuple[int, int], DraftPublishSnapshot] = {}
 
 
 def _fallback_feed_title(norm_url: str) -> str:
@@ -91,7 +90,57 @@ async def _safe_edit_status(status: Message, text: str, **kwargs: object) -> Non
         raise
 
 
+async def _delete_message_safe(message: Message) -> None:
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+
+
+async def _replace_message_with_screen(
+    message: Message,
+    bot: Bot,
+    text: str,
+    *,
+    parse_mode: str,
+    reply_markup: InlineKeyboardMarkup | ReplyKeyboardMarkup | None = None,
+) -> None:
+    """Новое сообщение с текстом и клавиатурой (ReplyKeyboard нельзя прикрепить через edit)."""
+    await _delete_message_safe(message)
+    await bot.send_message(
+        message.chat.id,
+        text,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup,
+    )
+
+
+async def _replace_callback_screen(
+    callback: CallbackQuery,
+    text: str,
+    *,
+    parse_mode: str,
+    reply_markup: InlineKeyboardMarkup | ReplyKeyboardMarkup | None = None,
+) -> None:
+    if not callback.message or not callback.from_user:
+        return
+    await _delete_message_safe(callback.message)
+    await callback.bot.send_message(
+        callback.from_user.id,
+        text,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup,
+    )
+
+
 def main_menu_text(name: str, *, key_hint: str) -> str:
+    cfg = load_settings()
+    posting_hint = ""
+    if not cfg.allow_auto_posting:
+        posting_hint = (
+            "\n\n**В канал уходит только то, что ты подтвердишь** в разделе «Черновики и очередь» "
+            "(кнопка «Опубликовать»)."
+        )
     return (
         f"Привет, {name}!\n\n"
         "Это бот **автопостинга в Telegram-каналы**: материалы из **твоих** источников новостей "
@@ -99,6 +148,7 @@ def main_menu_text(name: str, *, key_hint: str) -> str:
         "**Источник новостей:** пришли в чат **одной строкой** ссылку на **сайт** (https://…) — бот "
         "попробует найти ленту сам. Или открой раздел «Источники новостей».\n\n"
         "Другой вопрос по боту — просто напиши текстом (не одной только ссылкой)."
+        f"{posting_hint}"
         f"{key_hint}"
     )
 
@@ -225,10 +275,9 @@ async def compose_draft_detail(
         f"<b>{title}</b>\n\n{body}\n\n"
         f"Ссылка: <code>{link}</code>"
     )
-    draft_publish_target[(user_id, source_id)] = (
-        sug.item.entry_key,
-        sug.kind,
-        (sug.item.link or "").strip(),
+    draft_publish_target[(user_id, source_id)] = DraftPublishSnapshot(
+        item=sug.item,
+        kind=sug.kind,
     )
     kb = draft_detail_kb(
         source_id,
@@ -268,14 +317,18 @@ async def render_channels_html(user_id: int, bot: Bot) -> str:
 
 async def render_settings_html(user_id: int) -> str:
     ps = await get_posting_settings(user_id)
+    cfg = load_settings()
     daily = await get_daily_post_count(user_id)
     max_d = int(ps["max_posts_per_day"])
-    mode = str(ps.get("posting_mode") or ("auto" if ps["posting_enabled"] else "manual"))
-    mode_ru = (
-        "автоматический — бот сам публикует в канал"
-        if mode == "auto"
-        else "ручной — только черновики, публикация по кнопке «Опубликовать»"
-    )
+    if not cfg.allow_auto_posting:
+        mode_ru = "только ручной — сначала черновик в боте, в канал по кнопке «Опубликовать»"
+    else:
+        mode = str(ps.get("posting_mode") or ("auto" if ps["posting_enabled"] else "manual"))
+        mode_ru = (
+            "автоматический — бот сам публикует в канал"
+            if mode == "auto"
+            else "ручной — только черновики, публикация по кнопке «Опубликовать»"
+        )
     im = "да" if ps["send_images"] else "нет"
     qs, qe = ps["quiet_start_hour"], ps["quiet_end_hour"]
     if qs is None or qe is None:
@@ -295,12 +348,14 @@ async def render_settings_html(user_id: int) -> str:
 
 async def render_settings_kb(user_id: int):
     ps = await get_posting_settings(user_id)
+    cfg = load_settings()
     quiet_enabled = ps["quiet_start_hour"] is not None and ps["quiet_end_hour"] is not None
     mode = str(ps.get("posting_mode") or ("auto" if ps["posting_enabled"] else "manual"))
     return posting_settings_kb(
         posting_mode=mode,
         send_images=bool(ps["send_images"]),
         quiet_enabled=bool(quiet_enabled),
+        allow_auto_mode=cfg.allow_auto_posting,
     )
 
 
@@ -341,7 +396,7 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         main_menu_text(name, key_hint=key_hint),
         parse_mode="Markdown",
-        reply_markup=main_menu_kb(),
+        reply_markup=main_menu_reply_kb(),
     )
 
 
@@ -396,12 +451,14 @@ async def add_channel_from_raw(message: Message, bot: Bot, raw: str) -> None:
         return
 
     cid = await add_channel(message.from_user.id, chat_id=chat_id, title=title)
-    await status.edit_text(
+    await _replace_message_with_screen(
+        status,
+        bot,
         f"Канал добавлен: <b>#{cid}</b> {escape(str(title or 'Без названия'))}\n"
         f"<code>{chat_id}</code>\n\n"
         "Проверка прав бота отображается в разделе «Мои каналы».",
         parse_mode="HTML",
-        reply_markup=main_menu_kb(),
+        reply_markup=main_menu_reply_kb(),
     )
 
 
@@ -438,8 +495,9 @@ async def run_add_feed_pipeline(message: Message, status: Message, raw: str) -> 
         except aiosqlite.IntegrityError:
             await _safe_edit_status(status, "Такой URL уже есть в твоём списке.")
             return
-        await _safe_edit_status(
+        await _replace_message_with_screen(
             status,
+            message.bot,
             (
                 f"Источник <b>#{sid}</b> добавлен без проверки ленты.\n\n"
                 f"Адрес: <code>{escape(norm)}</code>\n\n"
@@ -449,7 +507,7 @@ async def run_add_feed_pipeline(message: Message, status: Message, raw: str) -> 
                 "новым источником, либо удалить этот и добавить снова.</i>"
             ),
             parse_mode="HTML",
-            reply_markup=main_menu_kb(),
+            reply_markup=main_menu_reply_kb(),
         )
         return
 
@@ -467,13 +525,14 @@ async def run_add_feed_pipeline(message: Message, status: Message, raw: str) -> 
         f"• {escape(t)}"
         for t, _ in preview.sample_entries[:3]
     )
-    await _safe_edit_status(
+    await _replace_message_with_screen(
         status,
+        message.bot,
         f"Добавлено <b>#{sid}</b>: {escape(preview.title)}\n\n"
         f"Лента новостей: <code>{escape(preview.url)}</code>\n\n"
         f"Примеры записей:\n{sample_lines}",
         parse_mode="HTML",
-        reply_markup=main_menu_kb(),
+        reply_markup=main_menu_reply_kb(),
     )
 
 
@@ -509,6 +568,145 @@ async def handle_pending_action_input(message: Message, bot: Bot) -> bool:
         cand = extract_feed_url_candidate(raw) or raw.strip()
         status = await message.answer("Ищу ленту…")
         await run_add_feed_pipeline(message, status, cand)
+        return True
+
+    return False
+
+
+async def handle_reply_menu_button(message: Message, bot: Bot) -> bool:
+    """Те же действия, что у callback menu:/ch:/src:, но по тексту кнопок ReplyKeyboard."""
+    if not message.from_user or not message.text:
+        return False
+    text = message.text.strip()
+    user_id = message.from_user.id
+    await ensure_user(user_id)
+
+    settings = load_settings()
+    name = (message.from_user.full_name or "друг").strip()
+    key_hint = ""
+    if not settings.openai_api_key:
+        key_hint = (
+            "\n\n⚠️ Для ответов в чате добавь в `.env` ключ `OPENAI_API_KEY=...` "
+            "и перезапусти бота."
+        )
+
+    if text == "Мои 📺 каналы":
+        html = await render_channels_html(user_id, bot)
+        await message.answer(html, parse_mode="HTML", reply_markup=channels_reply_kb())
+        return True
+    if text == "📰 Источники новостей":
+        html = await render_sources_html(user_id)
+        await message.answer(html, parse_mode="HTML", reply_markup=sources_reply_kb())
+        return True
+    if text == "Статус":
+        html = await render_status_html(user_id)
+        await message.answer(html, parse_mode="HTML", reply_markup=main_menu_reply_kb())
+        return True
+    if text == "Настройки постинга":
+        html = await render_settings_html(user_id)
+        kb = await render_settings_kb(user_id)
+        await message.answer(html, parse_mode="HTML", reply_markup=kb)
+        return True
+    if text == "Черновики и очередь":
+        html = await render_drafts_list_html(user_id)
+        rows = await list_rss_sources(user_id)
+        linked = _linked_sources(rows)
+        if linked:
+            await message.answer(html, parse_mode="HTML", reply_markup=drafts_list_kb(linked))
+        else:
+            await message.answer(html, parse_mode="HTML", reply_markup=main_menu_reply_kb())
+        return True
+    if text == "Помощь":
+        await message.answer(
+            "**Помощь**\n\n"
+            "1. Создай канал в Telegram (или возьми существующий).\n"
+            "2. Добавь этого бота **администратором** канала с правом **публиковать сообщения**.\n"
+            "3. Возьми ссылку канала вида <code>https://t.me/your_channel</code>.\n"
+            "4. **Источники новостей** удобно добавлять по ссылке на сайт: у многих СМИ есть "
+            "лента раздела или главной страницы.\n\n"
+            "Если что-то не работает — опиши в чате одним сообщением, постараюсь подсказать.\n\n"
+            "Подробности и управление — через кнопки меню.",
+            parse_mode="Markdown",
+            reply_markup=main_menu_reply_kb(),
+        )
+        return True
+    if text == "🏠 Главное меню":
+        await message.answer(
+            main_menu_text(name, key_hint=key_hint),
+            parse_mode="Markdown",
+            reply_markup=main_menu_reply_kb(),
+        )
+        return True
+
+    if text == "➕ Добавить канал":
+        pending_action_by_user[user_id] = "add_channel"
+        await message.answer(
+            "Пришли ссылку на канал или его numeric id одним сообщением.\n"
+            "Пример: https://t.me/your_channel"
+        )
+        return True
+    if text == "🗑 Удалить канал":
+        rows = await list_channels(user_id)
+        if not rows:
+            await message.answer("Нет каналов в списке.")
+            return True
+        await message.answer(
+            "<b>Удалить канал</b>\n\nВыбери канал:",
+            parse_mode="HTML",
+            reply_markup=channel_delete_pick_kb(rows),
+        )
+        return True
+    if text == "🔄 Обновить список каналов":
+        html = await render_channels_html(user_id, bot)
+        await message.answer(html, parse_mode="HTML", reply_markup=channels_reply_kb())
+        return True
+
+    if text == "➕ Добавить источник новостей":
+        pending_action_by_user[user_id] = "add_source"
+        await message.answer(
+            "Пришли одной строкой ссылку на сайт или прямую ссылку на ленту новостей."
+        )
+        return True
+    if text == "🔗 Привязать к каналу":
+        rows = await list_rss_sources(user_id)
+        unlinked = [r for r in rows if not r.get("channel_id")]
+        if not unlinked:
+            await message.answer("Все источники уже привязаны")
+            return True
+        await message.answer(
+            "<b>Привязать к каналу</b>\n\nВыбери источник новостей:",
+            parse_mode="HTML",
+            reply_markup=link_pick_source_kb(unlinked),
+        )
+        return True
+    if text == "🗑 Удалить источник новостей":
+        rows = await list_rss_sources(user_id)
+        if not rows:
+            await message.answer("Нет источников")
+            return True
+        await message.answer(
+            "<b>Удалить источник</b>\n\nВыбери из списка:",
+            parse_mode="HTML",
+            reply_markup=source_delete_pick_kb(rows),
+        )
+        return True
+    if text == "📤 Опубликовать 1 пост":
+        rows = await list_rss_sources(user_id)
+        linked = _linked_sources(rows)
+        if not linked:
+            await message.answer(
+                "Нет привязанных источников. Сначала привяжи источник к каналу."
+            )
+            return True
+        await message.answer(
+            "<b>Опубликовать одну запись</b>\n\nВыбери источник:",
+            parse_mode="HTML",
+            reply_markup=post_once_pick_kb(linked),
+        )
+        return True
+    if text == "🔄 Обновить список источников":
+        html = await render_sources_html(user_id)
+        await message.answer(html, parse_mode="HTML", reply_markup=sources_reply_kb())
         return True
 
     return False
@@ -552,7 +750,7 @@ async def ai_reply(message: Message, bot: Bot) -> None:
     for i, chunk in enumerate(chunks):
         await message.answer(
             chunk,
-            reply_markup=main_menu_kb() if i == len(chunks) - 1 else None,
+            reply_markup=main_menu_reply_kb() if i == len(chunks) - 1 else None,
         )
 
 
@@ -560,6 +758,8 @@ async def on_text_message(message: Message, bot: Bot) -> None:
     if not message.text:
         return
     if await handle_pending_action_input(message, bot):
+        return
+    if await handle_reply_menu_button(message, bot):
         return
     if looks_like_single_line_site_url(message.text):
         await message_plain_url_as_source(message)
@@ -588,10 +788,11 @@ async def menu_router(callback: CallbackQuery) -> None:
         )
 
     if action == "home":
-        await callback.message.edit_text(
+        await _replace_callback_screen(
+            callback,
             main_menu_text(name, key_hint=key_hint),
             parse_mode="Markdown",
-            reply_markup=main_menu_kb(),
+            reply_markup=main_menu_reply_kb(),
         )
         await callback.answer()
         return
@@ -602,7 +803,12 @@ async def menu_router(callback: CallbackQuery) -> None:
             return
         await ensure_user(callback.from_user.id)
         html = await render_channels_html(callback.from_user.id, callback.bot)
-        await callback.message.edit_text(html, parse_mode="HTML", reply_markup=channels_kb())
+        await _replace_callback_screen(
+            callback,
+            html,
+            parse_mode="HTML",
+            reply_markup=channels_reply_kb(),
+        )
         await callback.answer()
         return
 
@@ -612,10 +818,11 @@ async def menu_router(callback: CallbackQuery) -> None:
             return
         await ensure_user(callback.from_user.id)
         html = await render_sources_html(callback.from_user.id)
-        await callback.message.edit_text(
+        await _replace_callback_screen(
+            callback,
             html,
             parse_mode="HTML",
-            reply_markup=sources_kb(),
+            reply_markup=sources_reply_kb(),
         )
         await callback.answer()
         return
@@ -626,10 +833,11 @@ async def menu_router(callback: CallbackQuery) -> None:
             return
         await ensure_user(callback.from_user.id)
         html = await render_status_html(callback.from_user.id)
-        await callback.message.edit_text(
+        await _replace_callback_screen(
+            callback,
             html,
             parse_mode="HTML",
-            reply_markup=back_to_main_kb(),
+            reply_markup=main_menu_reply_kb(),
         )
         await callback.answer()
         return
@@ -657,13 +865,23 @@ async def menu_router(callback: CallbackQuery) -> None:
         html = await render_drafts_list_html(callback.from_user.id)
         rows = await list_rss_sources(callback.from_user.id)
         linked = _linked_sources(rows)
-        kb = drafts_list_kb(linked) if linked else back_to_main_kb()
-        await callback.message.edit_text(html, parse_mode="HTML", reply_markup=kb)
+        if linked:
+            await callback.message.edit_text(
+                html, parse_mode="HTML", reply_markup=drafts_list_kb(linked)
+            )
+        else:
+            await _replace_callback_screen(
+                callback,
+                html,
+                parse_mode="HTML",
+                reply_markup=main_menu_reply_kb(),
+            )
         await callback.answer()
         return
 
     if action == "help":
-        await callback.message.edit_text(
+        await _replace_callback_screen(
+            callback,
             "**Помощь**\n\n"
             "1. Создай канал в Telegram (или возьми существующий).\n"
             "2. Добавь этого бота **администратором** канала с правом **публиковать сообщения**.\n"
@@ -673,7 +891,7 @@ async def menu_router(callback: CallbackQuery) -> None:
             "Если что-то не работает — опиши в чате одним сообщением, постараюсь подсказать.\n\n"
             "Подробности и управление — через кнопки меню.",
             parse_mode="Markdown",
-            reply_markup=back_to_main_kb(),
+            reply_markup=main_menu_reply_kb(),
         )
         await callback.answer()
         return
@@ -715,7 +933,12 @@ async def channels_router(callback: CallbackQuery) -> None:
         ok = await delete_channel(user_id, cid)
         await callback.answer("Удалено" if ok else "Не вышло")
         html = await render_channels_html(user_id, callback.bot)
-        await callback.message.edit_text(html, parse_mode="HTML", reply_markup=channels_kb())
+        await _replace_callback_screen(
+            callback,
+            html,
+            parse_mode="HTML",
+            reply_markup=channels_reply_kb(),
+        )
         return
 
     await callback.answer()
@@ -817,7 +1040,12 @@ async def link_router(callback: CallbackQuery) -> None:
         ok = await set_rss_source_channel(user_id, rss_id=sid, channel_id=cid)
         await callback.answer("Готово" if ok else "Не вышло")
         html = await render_sources_html(user_id)
-        await callback.message.edit_text(html, parse_mode="HTML", reply_markup=sources_kb())
+        await _replace_callback_screen(
+            callback,
+            html,
+            parse_mode="HTML",
+            reply_markup=sources_reply_kb(),
+        )
         return
 
     await callback.answer()
@@ -836,7 +1064,12 @@ async def source_delete_router(callback: CallbackQuery) -> None:
     ok = await delete_rss_source(user_id, sid)
     await callback.answer("Удалено" if ok else "Не вышло")
     html = await render_sources_html(user_id)
-    await callback.message.edit_text(html, parse_mode="HTML", reply_markup=sources_kb())
+    await _replace_callback_screen(
+        callback,
+        html,
+        parse_mode="HTML",
+        reply_markup=sources_reply_kb(),
+    )
 
 
 async def post_once_router(callback: CallbackQuery) -> None:
@@ -873,7 +1106,12 @@ async def post_once_router(callback: CallbackQuery) -> None:
         return
     await status.edit_text("Готово — проверь канал." if posted else "Новых записей нет или лента пуста.")
     html = await render_sources_html(user_id)
-    await callback.message.edit_text(html, parse_mode="HTML", reply_markup=sources_kb())
+    await _replace_callback_screen(
+        callback,
+        html,
+        parse_mode="HTML",
+        reply_markup=sources_reply_kb(),
+    )
 
 
 async def draft_router(callback: CallbackQuery) -> None:
@@ -916,17 +1154,17 @@ async def draft_router(callback: CallbackQuery) -> None:
         if not row:
             await callback.answer("Источник не найден", show_alert=True)
             return
-        target = draft_publish_target.get((user_id, sid))
-        if target:
-            entry_key, kind, item_link = target
-        else:
+        snap = draft_publish_target.get((user_id, sid))
+        if not snap:
             sug = await get_draft_suggestion(sid, str(row["url"]))
             if not sug:
                 await callback.answer("Лента пуста или недоступна", show_alert=True)
                 return
-            entry_key = sug.item.entry_key
-            kind = sug.kind
-            item_link = (sug.item.link or "").strip()
+            snap = DraftPublishSnapshot(item=sug.item, kind=sug.kind)
+            draft_publish_target[(user_id, sid)] = snap
+        entry_key = snap.item.entry_key
+        kind = snap.kind
+        item_link = (snap.item.link or "").strip()
         # Тот же материал, что на экране; если автопост уже выложил эту запись — всё равно шлём пересказ снова.
         posted_already = await is_entry_posted(sid, entry_key)
         force_repost = kind == "repeat" or posted_already
@@ -940,8 +1178,17 @@ async def draft_router(callback: CallbackQuery) -> None:
             html = await render_drafts_list_html(user_id)
             rows = await list_rss_sources(user_id)
             linked = _linked_sources(rows)
-            kb = drafts_list_kb(linked) if linked else back_to_main_kb()
-            await callback.message.edit_text(html, parse_mode="HTML", reply_markup=kb)
+            if linked:
+                await callback.message.edit_text(
+                    html, parse_mode="HTML", reply_markup=drafts_list_kb(linked)
+                )
+            else:
+                await _replace_callback_screen(
+                    callback,
+                    html,
+                    parse_mode="HTML",
+                    reply_markup=main_menu_reply_kb(),
+                )
             return
         await callback.answer("Публикую…")
         status = await callback.message.answer("Публикую в канал…")
@@ -953,6 +1200,7 @@ async def draft_router(callback: CallbackQuery) -> None:
                 ignore_user_posting_rules=True,
                 only_entry_key=entry_key,
                 force_repost=force_repost,
+                fallback_feed_item=snap.item,
             )
         except Exception:  # noqa: BLE001
             logging.exception("draft post")
@@ -960,12 +1208,25 @@ async def draft_router(callback: CallbackQuery) -> None:
             return
         if posted:
             draft_publish_target.pop((user_id, sid), None)
-        await status.edit_text("Готово — проверь канал." if posted else "Не удалось опубликовать (запись пропала из ленты или ошибка сети).")
+        await status.edit_text(
+            "Готово — проверь канал."
+            if posted
+            else "Не удалось опубликовать. Проверь права бота в канале, ключ ИИ в .env или попробуй позже."
+        )
         html = await render_drafts_list_html(user_id)
         rows = await list_rss_sources(user_id)
         linked = _linked_sources(rows)
-        kb = drafts_list_kb(linked) if linked else back_to_main_kb()
-        await callback.message.edit_text(html, parse_mode="HTML", reply_markup=kb)
+        if linked:
+            await callback.message.edit_text(
+                html, parse_mode="HTML", reply_markup=drafts_list_kb(linked)
+            )
+        else:
+            await _replace_callback_screen(
+                callback,
+                html,
+                parse_mode="HTML",
+                reply_markup=main_menu_reply_kb(),
+            )
         return
 
     if len(parts) == 3 and parts[0] == "d" and parts[1] == "k" and parts[2].isdigit():
@@ -1010,6 +1271,13 @@ async def posting_settings_router(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
 
     if action == "mode" and len(parts) == 3 and parts[2] in ("manual", "auto"):
+        cfg = load_settings()
+        if parts[2] == "auto" and not cfg.allow_auto_posting:
+            await callback.answer(
+                "Автопост в канал отключён. Добавь в .env ALLOW_AUTO_POSTING=1 и перезапусти бота.",
+                show_alert=True,
+            )
+            return
         await update_posting_settings(user_id, posting_mode=parts[2])
         await callback.answer("Режим сохранён")
     elif action == "toggle_images":

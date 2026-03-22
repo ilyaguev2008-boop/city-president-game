@@ -13,6 +13,8 @@ class Settings:
     openai_model: str
     poll_interval_sec: int
     rss_monitor_interval_sec: int
+    # Если False — в канал ничего не уходит без кнопки «Опубликовать» в черновиках (даже если в БД стоит «авто»).
+    allow_auto_posting: bool
 
 
 def _load_dotenv_if_exists(path: Path) -> None:
@@ -48,6 +50,8 @@ def load_settings() -> Settings:
     except ValueError:
         rss_monitor_interval_sec = 90
 
+    allow_auto = os.getenv("ALLOW_AUTO_POSTING", "0").strip().lower() in ("1", "true", "yes", "on")
+
     if not token:
         raise RuntimeError(
             "BOT_TOKEN is not set. Создай .env рядом с bot.py/config.py "
@@ -61,4 +65,5 @@ def load_settings() -> Settings:
         openai_model=openai_model or "gpt-4o-mini",
         poll_interval_sec=poll_interval_sec,
         rss_monitor_interval_sec=rss_monitor_interval_sec,
+        allow_auto_posting=allow_auto,
     )

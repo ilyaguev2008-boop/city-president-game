@@ -1,4 +1,9 @@
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
 
 def _btn_short(text: str, max_len: int = 42) -> str:
@@ -8,7 +13,58 @@ def _btn_short(text: str, max_len: int = 42) -> str:
     return t[: max_len - 1] + "…"
 
 
+def main_menu_reply_kb() -> ReplyKeyboardMarkup:
+    """Панель внизу чата — основное меню."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="Мои 📺 каналы"),
+                KeyboardButton(text="📰 Источники новостей"),
+            ],
+            [
+                KeyboardButton(text="Статус"),
+                KeyboardButton(text="Настройки постинга"),
+            ],
+            [KeyboardButton(text="Черновики и очередь")],
+            [KeyboardButton(text="Помощь")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Ссылка на сайт или вопрос боту…",
+    )
+
+
+def channels_reply_kb() -> ReplyKeyboardMarkup:
+    """Панель раздела «Мои каналы»."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="➕ Добавить канал"),
+                KeyboardButton(text="🗑 Удалить канал"),
+            ],
+            [KeyboardButton(text="🔄 Обновить список каналов")],
+            [KeyboardButton(text="🏠 Главное меню")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def sources_reply_kb() -> ReplyKeyboardMarkup:
+    """Панель раздела «Источники новостей»."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="➕ Добавить источник новостей")],
+            [KeyboardButton(text="🔗 Привязать к каналу")],
+            [KeyboardButton(text="🗑 Удалить источник новостей")],
+            [KeyboardButton(text="📤 Опубликовать 1 пост")],
+            [KeyboardButton(text="🔄 Обновить список источников")],
+            [KeyboardButton(text="🏠 Главное меню")],
+        ],
+        resize_keyboard=True,
+    )
+
+
 def main_menu_kb() -> InlineKeyboardMarkup:
+    """Устар.: инлайн-меню; оставлено для совместимости со старыми сообщениями."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Мои 📺 каналы", callback_data="menu:channels")],
@@ -160,10 +216,12 @@ def posting_settings_kb(
     posting_mode: str,
     send_images: bool,
     quiet_enabled: bool,
+    allow_auto_mode: bool = False,
 ) -> InlineKeyboardMarkup:
     auto_on = posting_mode == "auto"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    rows: list[list[InlineKeyboardButton]] = []
+    if allow_auto_mode:
+        rows.append(
             [
                 InlineKeyboardButton(
                     text=f"Ручной{' ✓' if not auto_on else ''}",
@@ -173,7 +231,10 @@ def posting_settings_kb(
                     text=f"Авто{' ✓' if auto_on else ''}",
                     callback_data="ps:mode:auto",
                 ),
-            ],
+            ]
+        )
+    rows.extend(
+        [
             [
                 InlineKeyboardButton(
                     text=f"Картинки: {'ON' if send_images else 'OFF'}",
@@ -197,3 +258,4 @@ def posting_settings_kb(
             [InlineKeyboardButton(text="« Главное меню", callback_data="menu:home")],
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)

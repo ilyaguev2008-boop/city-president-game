@@ -76,8 +76,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_user_url ON rss_sources (user_id, url)
 
 CREATE TABLE IF NOT EXISTS user_posting_settings (
     user_id INTEGER PRIMARY KEY REFERENCES users (user_id) ON DELETE CASCADE,
-    posting_enabled INTEGER NOT NULL DEFAULT 1 CHECK (posting_enabled IN (0, 1)),
-    posting_mode TEXT NOT NULL DEFAULT 'auto' CHECK (posting_mode IN ('manual', 'auto')),
+    posting_enabled INTEGER NOT NULL DEFAULT 0 CHECK (posting_enabled IN (0, 1)),
+    posting_mode TEXT NOT NULL DEFAULT 'manual' CHECK (posting_mode IN ('manual', 'auto')),
     max_posts_per_day INTEGER NOT NULL DEFAULT 20,
     quiet_start_hour INTEGER,
     quiet_end_hour INTEGER,
@@ -154,6 +154,18 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         )
         """
     )
+
+    cur_uv = await conn.execute("PRAGMA user_version")
+    uv_row = await cur_uv.fetchone()
+    user_ver = int(uv_row[0]) if uv_row else 0
+    if user_ver < 2:
+        await conn.execute(
+            """
+            UPDATE user_posting_settings
+            SET posting_mode = 'manual', posting_enabled = 0
+            """
+        )
+        await conn.execute("PRAGMA user_version = 2")
 
 
 async def init_db() -> None:
@@ -527,7 +539,10 @@ async def ensure_posting_settings(user_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA foreign_keys = ON")
         await db.execute(
-            "INSERT OR IGNORE INTO user_posting_settings (user_id) VALUES (?)",
+            """
+            INSERT OR IGNORE INTO user_posting_settings (user_id, posting_enabled, posting_mode)
+            VALUES (?, 0, 'manual')
+            """,
             (user_id,),
         )
         await db.commit()

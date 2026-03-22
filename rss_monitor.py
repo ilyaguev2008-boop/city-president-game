@@ -69,9 +69,13 @@ async def _poll_one_source(bot: Bot, job: dict[str, object]) -> None:
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
-                                text="Черновики и очередь",
+                                text="Открыть черновик",
+                                callback_data=f"d:v:{source_id}",
+                            ),
+                            InlineKeyboardButton(
+                                text="Все черновики",
                                 callback_data="menu:drafts",
-                            )
+                            ),
                         ],
                     ]
                 )
