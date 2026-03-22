@@ -25,7 +25,7 @@ from db import (
 from posting_rules import is_quiet_hour_local
 from post_image_selection import resolve_final_image_urls
 from rss_entries import FeedItem, parse_feed_entries
-from text_utils import sanitize_post_text, strip_urls
+from text_utils import normalize_cyrillic_news_prose, sanitize_post_text, strip_urls
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +220,7 @@ async def _publish_feed_item(
                 model=settings.openai_model,
                 title=item.title,
                 body=item.body_text,
+                polish_english_translation=settings.post_polish_english_to_russian,
             )
         except Exception as exc:
             logger.exception("Ошибка ИИ source_id=%s", source_id)
@@ -254,8 +255,12 @@ async def _publish_feed_item(
     text = sanitize_post_text(strip_urls(ai_note + rewritten))
     if not text.strip():
         text = sanitize_post_text(strip_urls(f"{item.title}\n\n{item.body_text}"))
+    text = normalize_cyrillic_news_prose(text)
 
-    body_for_images = sanitize_post_text(strip_urls(rewritten))[:8000]
+    # Текст для отбора картинок — без префикса предупреждений ИИ, с теми же правилами кириллицы.
+    body_for_images = normalize_cyrillic_news_prose(
+        sanitize_post_text(strip_urls(rewritten))
+    )[:8000]
 
     photo_ok = False
     if send_images:
@@ -272,6 +277,7 @@ async def _publish_feed_item(
             max_images=max_img,
             use_llm_selection=use_llm_img,
             web_fallback=settings.image_web_duckduckgo_fallback,
+            semantic_only=settings.post_image_semantic_only,
         )
         if len(image_urls) > 1:
             try:

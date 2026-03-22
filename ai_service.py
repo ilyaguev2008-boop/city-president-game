@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 import aiohttp
 
-from text_utils import clean_title_for_post, sanitize_post_text, strip_urls
+from text_utils import (
+    clean_title_for_post,
+    normalize_cyrillic_news_prose,
+    sanitize_post_text,
+    strip_urls,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +41,15 @@ NEWS_REWRITE_SYSTEM_RU = """Ты редактор новостей для Telegr
 Перескажи материал на русском языке для поста.
 
 Правила:
+- Пиши только кириллицей. Латиницей допускаются только имена собственные (люди, организации, топонимы,
+  бренды, названия продуктов и сервисов), устойчивые аббревиатуры и обозначения (ООН, ЕС, NASA, COVID-19,
+  Wi‑Fi, iPhone). Не вставляй английские служебные слова вроде the, and, news, report, said, according —
+  всё формулируй по-русски.
+- Если в источнике есть английский текст (слова, фразы, заголовки) — переведи на русский полностью.
+  Не оставляй английские обобщения и служебные слова. Имена собственные оставляй на латинице как в источнике
+  или в общепринятом написании: названия клубов, компаний, брендов, СМИ, стадионов, городов и стран (если
+  в источнике латиница), персональные имена, названия продуктов и сервисов. Не переводи как имена
+  обычные английские слова вроде «report», «news» — их замени русскими эквивалентами.
 - 2–4 коротких абзаца, без хэштегов и без заголовка уровня Markdown (#).
 - Не вставляй ссылки, URL и фразы вроде «читайте по ссылке».
 - Не выдумывай факты; если чего-то нет в тексте — не дополняй.
@@ -42,6 +57,43 @@ NEWS_REWRITE_SYSTEM_RU = """Ты редактор новостей для Telegr
 - Убери из текста: призывы подписаться, рекламу, «читайте также», подписи к фото без фактов,
   хлебные крошки, теги, служебные пометки редакции — оставь только суть новости.
 - Не добавляй эмодзи и декоративные символы, кроме обычных знаков препинания."""
+
+POLISH_ENGLISH_TO_RUSSIAN_SYSTEM_RU = """Ты редактор новостей для Telegram-канала.
+
+Перед тобой готовый текст поста на русском. Твоя задача — одна:
+- Замени все оставшиеся английские слова и фразы на русские эквиваленты.
+- Имена собственные не переводить: люди, футбольные/спортивные клубы, компании, бренды, СМИ, стадионы,
+  города и страны в латинице как в тексте, аббревиатуры (ООН, NASA, ЕС и т.п.), устойчивые латинские
+  названия продуктов (iPhone, YouTube — если так в тексте).
+- Не меняй смысл, факты и порядок абзацев. Не добавляй эмодзи и ссылки.
+- Верни только итоговый текст поста, без комментариев и заголовков «Итог»."""
+
+
+def _text_needs_english_polish(text: str) -> bool:
+    """Есть ли латинские буквы (возможный непереведённый английский)."""
+    return bool(re.search(r"[A-Za-z]", text)) if text else False
+
+
+async def polish_english_to_russian_ru(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    text: str,
+    timeout_sec: int = 60,
+) -> str:
+    """Второй проход: перевод оставшегося английского, имена собственные сохраняются."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    return await complete_chat(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        user_text=t,
+        timeout_sec=timeout_sec,
+        system_prompt=POLISH_ENGLISH_TO_RUSSIAN_SYSTEM_RU,
+    )
 
 SYSTEM_PROMPT_RU = """Ты дружелюбный AI-помощник для владельцев Telegram-каналов, которые используют бота автопостинга из своих источников новостей.
 
@@ -123,12 +175,13 @@ async def rewrite_news_ru(
     title: str,
     body: str,
     timeout_sec: int = 90,
+    polish_english_translation: bool = True,
 ) -> str:
     """Пересказ новости на русском для поста (без ссылок в тексте на стороне модели)."""
     title = clean_title_for_post(title)
     body = sanitize_post_text(strip_urls(body))[:12000]
     user_text = f"Заголовок:\n{title}\n\nТекст:\n{body}"
-    return await complete_chat(
+    raw = await complete_chat(
         api_key=api_key,
         base_url=base_url,
         model=model,
@@ -136,6 +189,22 @@ async def rewrite_news_ru(
         timeout_sec=timeout_sec,
         system_prompt=NEWS_REWRITE_SYSTEM_RU,
     )
+    out = sanitize_post_text(raw)
+    out = normalize_cyrillic_news_prose(out)
+    if polish_english_translation and _text_needs_english_polish(out):
+        try:
+            polished = await polish_english_to_russian_ru(
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                text=out,
+                timeout_sec=min(90, timeout_sec + 20),
+            )
+            out = sanitize_post_text(polished)
+            out = normalize_cyrillic_news_prose(out)
+        except Exception:
+            logger.warning("ИИ: не удалось довести перевод английского", exc_info=True)
+    return out
 
 
 def split_for_telegram(text: str, max_len: int = 4000) -> list[str]:

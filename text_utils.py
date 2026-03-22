@@ -138,6 +138,215 @@ def sanitize_post_text(text: str) -> str:
     return t.strip()
 
 
+# Типичные английские служебные слова в «русском» тексте (модель иногда вставляет их) —
+# удаляем только полностью строчные латинские токены, чтобы не трогать имена (Title Case) и бренды.
+_EN_STOPWORDS_LOWER = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "but",
+        "if",
+        "as",
+        "of",
+        "at",
+        "by",
+        "for",
+        "with",
+        "from",
+        "into",
+        "onto",
+        "upon",
+        "to",
+        "in",
+        "on",
+        "over",
+        "under",
+        "after",
+        "before",
+        "between",
+        "through",
+        "during",
+        "about",
+        "against",
+        "among",
+        "is",
+        "are",
+        "was",
+        "were",
+        "been",
+        "be",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "must",
+        "shall",
+        "can",
+        "this",
+        "that",
+        "these",
+        "those",
+        "it",
+        "its",
+        "they",
+        "them",
+        "their",
+        "he",
+        "she",
+        "his",
+        "her",
+        "we",
+        "you",
+        "who",
+        "whom",
+        "which",
+        "what",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "nor",
+        "not",
+        "only",
+        "own",
+        "same",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "also",
+        "even",
+        "here",
+        "there",
+        "then",
+        "once",
+        "again",
+        "further",
+        "news",
+        "report",
+        "reports",
+        "said",
+        "says",
+        "according",
+        "sources",
+        "source",
+        "media",
+        "press",
+        "official",
+        "government",
+        "state",
+        "country",
+        "million",
+        "billion",
+        "percent",
+        "per",
+        "new",
+        "first",
+        "last",
+        "next",
+        "year",
+        "years",
+        "day",
+        "days",
+        "week",
+        "weeks",
+        "month",
+        "months",
+        "time",
+        "people",
+        "two",
+        "one",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "read",
+        "more",
+        "full",
+        "story",
+        "video",
+        "photo",
+        "image",
+        "file",
+        "via",
+        "ok",
+        "okay",
+        "yes",
+        "vs",
+        "etc",
+        "ie",
+        "eg",
+        "approx",
+    }
+)
+
+
+def _strip_token_punctuation_for_check(token: str) -> str:
+    return token.strip(".,!?;:«»\"'()[]…—–‐-")
+
+
+def _is_ascii_lowercase_stopword_token(core: str) -> bool:
+    if len(core) < 2:
+        return False
+    if not core.isascii():
+        return False
+    if not core.isalpha():
+        return False
+    if not core.islower():
+        return False
+    return core in _EN_STOPWORDS_LOWER
+
+
+def normalize_cyrillic_news_prose(text: str) -> str:
+    """
+    Убирает случайные английские служебные слова (полностью строчные латинские токены из списка).
+    Имена собственные вроде Trump, NASA, iPhone не трогает (не совпадают с условием «всё строчное»).
+    """
+    if not text:
+        return ""
+    lines_out: list[str] = []
+    for line in text.split("\n"):
+        toks = line.split()
+        kept: list[str] = []
+        for t in toks:
+            core = _strip_token_punctuation_for_check(t)
+            if core and _is_ascii_lowercase_stopword_token(core):
+                continue
+            kept.append(t)
+        lines_out.append(" ".join(kept))
+    t = "\n".join(lines_out)
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+
 def clean_title_for_post(title: str) -> str:
     """Заголовок: без HTML и лишних пробелов."""
     if not title:
