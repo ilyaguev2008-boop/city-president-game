@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -15,6 +18,14 @@ class Settings:
     rss_monitor_interval_sec: int
     # Если False — в канал ничего не уходит без кнопки «Опубликовать» в черновиках (даже если в БД стоит «авто»).
     allow_auto_posting: bool
+    # Если ИИ недоступен — публиковать заголовок+текст из ленты без пересказа (иначе пост не уйдёт).
+    openai_fallback_plain_text: bool
+    # Сколько фото в одном посте (Telegram: разумно 1–2).
+    post_max_images: int
+    # Отбор релевантных картинок по смыслу поста (нужен OPENAI_API_KEY).
+    post_image_llm_selection: bool
+    # Если на сайте мало подходящих — добрать через DuckDuckGo (пакет duckduckgo-search).
+    image_web_duckduckgo_fallback: bool
 
 
 def _load_dotenv_if_exists(path: Path) -> None:
@@ -52,11 +63,34 @@ def load_settings() -> Settings:
 
     allow_auto = os.getenv("ALLOW_AUTO_POSTING", "0").strip().lower() in ("1", "true", "yes", "on")
 
+    # По умолчанию вкл.: иначе любой сбой API останавливает публикацию.
+    fb_raw = os.getenv("OPENAI_FALLBACK_PLAIN_TEXT", "1").strip().lower()
+    openai_fallback_plain_text = fb_raw in ("1", "true", "yes", "on")
+
+    pm_raw = os.getenv("POST_MAX_IMAGES", "2").strip()
+    try:
+        post_max_images = max(1, min(10, int(pm_raw)))
+    except ValueError:
+        post_max_images = 2
+
+    pil_raw = os.getenv("POST_IMAGE_LLM_SELECTION", "1").strip().lower()
+    post_image_llm_selection = pil_raw in ("1", "true", "yes", "on")
+
+    img_web_raw = os.getenv("IMAGE_WEB_DUCKDUCKGO_FALLBACK", "0").strip().lower()
+    image_web_duckduckgo_fallback = img_web_raw in ("1", "true", "yes", "on")
+
     if not token:
         raise RuntimeError(
             "BOT_TOKEN is not set. Создай .env рядом с bot.py/config.py "
                 "и добавь строку BOT_TOKEN=123:ABC..."
         )
+
+    if openai_api_key and "api.openai.com" in (openai_base_url or "").lower():
+        if not openai_api_key.startswith("sk-"):
+            logger.warning(
+                "OPENAI_API_KEY для platform.openai.com обычно начинается с sk- . "
+                "Проверь ключ: https://platform.openai.com/api-keys"
+            )
 
     return Settings(
         bot_token=token,
@@ -66,4 +100,8 @@ def load_settings() -> Settings:
         poll_interval_sec=poll_interval_sec,
         rss_monitor_interval_sec=rss_monitor_interval_sec,
         allow_auto_posting=allow_auto,
+        openai_fallback_plain_text=openai_fallback_plain_text,
+        post_max_images=post_max_images,
+        post_image_llm_selection=post_image_llm_selection,
+        image_web_duckduckgo_fallback=image_web_duckduckgo_fallback,
     )

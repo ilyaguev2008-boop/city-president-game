@@ -101,14 +101,22 @@ async def run_rss_monitor_loop(bot: Bot) -> None:
     При появлении новой верхней записи шлёт пользователю напоминание в личку.
     """
     await asyncio.sleep(2)
+    sem = asyncio.Semaphore(8)
+
+    async def _poll_limited(job: dict[str, object]) -> None:
+        async with sem:
+            try:
+                await _poll_one_source(bot, job)
+            except Exception:
+                logger.exception("rss monitor job source_id=%s", job.get("source_id"))
+
     while True:
         settings = load_settings()
         interval = settings.rss_monitor_interval_sec
         try:
             jobs = await list_rss_sources_for_monitor()
-            for job in jobs:
-                await _poll_one_source(bot, job)
-                await asyncio.sleep(0.05)
+            if jobs:
+                await asyncio.gather(*(_poll_limited(j) for j in jobs))
         except Exception:
             logger.exception("Сбой тика мониторинга RSS")
 

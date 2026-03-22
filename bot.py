@@ -13,6 +13,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup
 
 from ai_service import complete_chat, split_for_telegram
+from channel_permissions import bot_can_post_to_channel
 from config import load_settings
 from db import (
     add_channel,
@@ -52,6 +53,7 @@ from keyboards import (
 )
 from post_worker import process_one_feed_job, run_post_worker_loop
 from rss_monitor import run_rss_monitor_loop
+from telegram_helpers import get_bot_user_id
 
 TG_LINK_RE = re.compile(r"^(?:https?://)?(?:t\.me/|telegram\.me/)?@?([A-Za-z0-9_]{5,})/?$", re.IGNORECASE)
 pending_action_by_user: dict[int, str] = {}
@@ -218,10 +220,18 @@ async def render_drafts_list_html(user_id: int) -> str:
         "(можно снова опубликовать с пересказом). Нажми строку, чтобы открыть.",
         "",
     ]
-    for r in linked:
+    suggestions = await asyncio.gather(
+        *[get_draft_suggestion(int(r["id"]), str(r["url"])) for r in linked],
+        return_exceptions=True,
+    )
+    for r, sug in zip(linked, suggestions):
         sid = int(r["id"])
         name = escape(str(r.get("feed_title") or "—"))
-        sug = await get_draft_suggestion(sid, str(r["url"]))
+        if isinstance(sug, Exception):
+            lines.append(
+                f"📌 <b>#{sid}</b> {name}\n<i>Ошибка при опросе ленты.</i>\n"
+            )
+            continue
         if not sug:
             lines.append(f"📌 <b>#{sid}</b> {name}\n<i>Лента пуста или недоступна.</i>\n")
         elif sug.kind == "repeat":
@@ -297,14 +307,14 @@ async def render_channels_html(user_id: int, bot: Bot) -> str:
         )
 
     lines: list[str] = ["<b>Мои каналы</b>", ""]
+    bot_uid = await get_bot_user_id(bot)
     for row in rows:
         chat_id = int(row["chat_id"])
         title = escape(str(row["title"] or "Без названия"))
         status = "⚪️"
         try:
-            me = await bot.get_me()
-            member = await bot.get_chat_member(chat_id=chat_id, user_id=me.id)
-            can_post = bool(getattr(member, "can_post_messages", False))
+            member = await bot.get_chat_member(chat_id=chat_id, user_id=bot_uid)
+            can_post = bot_can_post_to_channel(member)
             status = "✅" if can_post else "⚠️"
         except Exception:  # noqa: BLE001
             status = "❌"
@@ -1097,14 +1107,18 @@ async def post_once_router(callback: CallbackQuery) -> None:
     await callback.answer("Публикую…")
     status = await callback.message.answer("Публикую одну запись…")
     try:
-        posted = await process_one_feed_job(
+        outcome = await process_one_feed_job(
             callback.bot, settings, jid, ignore_user_posting_rules=True
         )
     except Exception:  # noqa: BLE001
         logging.exception("post_once from button")
         await status.edit_text("Ошибка при публикации.")
         return
-    await status.edit_text("Готово — проверь канал." if posted else "Новых записей нет или лента пуста.")
+    await status.edit_text(
+        "Готово — проверь канал."
+        if outcome.ok
+        else (outcome.user_message or "Новых записей нет или лента пуста.")
+    )
     html = await render_sources_html(user_id)
     await _replace_callback_screen(
         callback,
@@ -1193,7 +1207,7 @@ async def draft_router(callback: CallbackQuery) -> None:
         await callback.answer("Публикую…")
         status = await callback.message.answer("Публикую в канал…")
         try:
-            posted = await process_one_feed_job(
+            outcome = await process_one_feed_job(
                 callback.bot,
                 settings,
                 jid,
@@ -1206,12 +1220,12 @@ async def draft_router(callback: CallbackQuery) -> None:
             logging.exception("draft post")
             await status.edit_text("Ошибка при публикации.")
             return
-        if posted:
+        if outcome.ok:
             draft_publish_target.pop((user_id, sid), None)
         await status.edit_text(
             "Готово — проверь канал."
-            if posted
-            else "Не удалось опубликовать. Проверь права бота в канале, ключ ИИ в .env или попробуй позже."
+            if outcome.ok
+            else (outcome.user_message or "Не удалось опубликовать.")
         )
         html = await render_drafts_list_html(user_id)
         rows = await list_rss_sources(user_id)

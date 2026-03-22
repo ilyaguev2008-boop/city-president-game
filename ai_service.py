@@ -6,7 +6,29 @@ from typing import Any
 
 import aiohttp
 
+from text_utils import clean_title_for_post, sanitize_post_text, strip_urls
+
 logger = logging.getLogger(__name__)
+
+
+def _parse_openai_error_body(raw: str) -> str:
+    """Текст ошибки из JSON ответа OpenAI-совместимого API."""
+    if not raw.strip():
+        return "(пустой ответ)"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw.strip()[:400]
+    err = data.get("error")
+    if isinstance(err, dict):
+        msg = err.get("message") or err.get("code") or str(err)
+        typ = err.get("type") or err.get("param")
+        if typ:
+            return f"{msg} ({typ})"[:400]
+        return str(msg)[:400]
+    if isinstance(err, str):
+        return err[:400]
+    return raw.strip()[:400]
 
 NEWS_REWRITE_SYSTEM_RU = """Ты редактор новостей для Telegram-канала.
 
@@ -16,7 +38,10 @@ NEWS_REWRITE_SYSTEM_RU = """Ты редактор новостей для Telegr
 - 2–4 коротких абзаца, без хэштегов и без заголовка уровня Markdown (#).
 - Не вставляй ссылки, URL и фразы вроде «читайте по ссылке».
 - Не выдумывай факты; если чего-то нет в тексте — не дополняй.
-- Сохраняй нейтральный тон новости."""
+- Сохраняй нейтральный тон новости.
+- Убери из текста: призывы подписаться, рекламу, «читайте также», подписи к фото без фактов,
+  хлебные крошки, теги, служебные пометки редакции — оставь только суть новости.
+- Не добавляй эмодзи и декоративные символы, кроме обычных знаков препинания."""
 
 SYSTEM_PROMPT_RU = """Ты дружелюбный AI-помощник для владельцев Telegram-каналов, которые используют бота автопостинга из своих источников новостей.
 
@@ -56,22 +81,38 @@ async def complete_chat(
     }
 
     timeout = aiohttp.ClientTimeout(total=timeout_sec)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(url, headers=headers, json=payload) as resp:
-            raw = await resp.text()
-            if resp.status != 200:
-                logger.warning("OpenAI API error %s: %s", resp.status, raw[:500])
-                raise RuntimeError(f"API вернуло {resp.status}")
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, headers=headers, json=payload) as resp:
+                raw = await resp.text()
+                if resp.status != 200:
+                    detail = _parse_openai_error_body(raw)
+                    logger.warning(
+                        "Chat API HTTP %s %s: %s",
+                        resp.status,
+                        url,
+                        raw[:800],
+                    )
+                    raise RuntimeError(f"HTTP {resp.status}: {detail}")
 
-            data = json.loads(raw)
-            choices = data.get("choices")
-            if not choices:
-                raise RuntimeError("Пустой ответ от API")
-            message = choices[0].get("message") or {}
-            content = message.get("content")
-            if not content:
-                raise RuntimeError("Нет текста в ответе")
-            return str(content).strip()
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(f"Некорректный JSON от API: {raw[:200]}") from exc
+                choices = data.get("choices")
+                if not choices:
+                    raise RuntimeError(f"Нет choices в ответе: {raw[:300]}")
+                message = choices[0].get("message") or {}
+                content = message.get("content")
+                if not content:
+                    # Некоторые модели отдают refusal / tool_calls
+                    if message.get("refusal"):
+                        raise RuntimeError(f"Модель отказалась: {message.get('refusal')}")
+                    raise RuntimeError("Нет текста в ответе")
+                return str(content).strip()
+    except aiohttp.ClientError as exc:
+        logger.warning("Сеть при запросе к ИИ: %s", exc)
+        raise RuntimeError(f"Сеть: {exc}") from exc
 
 
 async def rewrite_news_ru(
@@ -84,7 +125,9 @@ async def rewrite_news_ru(
     timeout_sec: int = 90,
 ) -> str:
     """Пересказ новости на русском для поста (без ссылок в тексте на стороне модели)."""
-    user_text = f"Заголовок:\n{title}\n\nТекст:\n{body[:12000]}"
+    title = clean_title_for_post(title)
+    body = sanitize_post_text(strip_urls(body))[:12000]
+    user_text = f"Заголовок:\n{title}\n\nТекст:\n{body}"
     return await complete_chat(
         api_key=api_key,
         base_url=base_url,

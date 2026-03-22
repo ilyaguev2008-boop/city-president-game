@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import NamedTuple
 
 from aiogram import Bot
 from aiogram.types import InputMediaPhoto, URLInputFile
 
-from article_images import fetch_article_image_urls
+from channel_permissions import bot_can_post_to_channel
 from ai_service import rewrite_news_ru, split_for_telegram
 from config import load_settings
+from telegram_helpers import get_bot_user_id
 from db import (
     add_worker_event,
     get_daily_post_count,
@@ -21,10 +23,17 @@ from db import (
     remember_published_article_link,
 )
 from posting_rules import is_quiet_hour_local
+from post_image_selection import resolve_final_image_urls
 from rss_entries import FeedItem, parse_feed_entries
-from text_utils import strip_urls
+from text_utils import sanitize_post_text, strip_urls
 
 logger = logging.getLogger(__name__)
+
+
+class PublishOutcome(NamedTuple):
+    ok: bool
+    """Короткий текст для пользователя в чате с ботом; None — не показывать (фоновый воркер)."""
+    user_message: str | None = None
 
 
 async def process_one_feed_job(
@@ -36,7 +45,7 @@ async def process_one_feed_job(
     only_entry_key: str | None = None,
     force_repost: bool = False,
     fallback_feed_item: FeedItem | None = None,
-) -> bool:
+) -> PublishOutcome:
     source_id = int(job["source_id"])
     user_id = int(job["user_id"])
     chat_id = int(job["chat_id"])
@@ -46,27 +55,29 @@ async def process_one_feed_job(
     if not ignore_user_posting_rules:
         # Ручной режим: воркер не публикует в канал — только черновики в боте.
         if ps.get("posting_mode") == "manual":
-            return False
+            return PublishOutcome(False)
         # По умолчанию автопост в канал выключен (см. ALLOW_AUTO_POSTING в .env).
         if not settings.allow_auto_posting:
-            return False
+            return PublishOutcome(False)
         if not ps["posting_enabled"]:
-            return False
+            return PublishOutcome(False)
         if await get_daily_post_count(user_id) >= int(ps["max_posts_per_day"]):
-            return False
+            return PublishOutcome(False)
         if is_quiet_hour_local(
             start_hour=ps["quiet_start_hour"],
             end_hour=ps["quiet_end_hour"],
         ):
-            return False
+            return PublishOutcome(False)
 
     send_images = bool(ps["send_images"])
 
     # Явно проверяем, что бот всё ещё может писать в канал.
     try:
-        me = await bot.get_me()
-        member = await bot.get_chat_member(chat_id=chat_id, user_id=me.id)
-        can_post = bool(getattr(member, "can_post_messages", False))
+        member = await bot.get_chat_member(
+            chat_id=chat_id,
+            user_id=await get_bot_user_id(bot),
+        )
+        can_post = bot_can_post_to_channel(member)
         if not can_post:
             await add_worker_event(
                 user_id=user_id,
@@ -75,7 +86,10 @@ async def process_one_feed_job(
                 kind="channel_permission",
                 message=f"Нет права публикации в канале {chat_id}",
             )
-            return False
+            return PublishOutcome(
+                False,
+                "У бота нет права «Публикация сообщений» в этом канале. Открой админов канала и включи его.",
+            )
     except Exception:
         logger.exception("Ошибка проверки прав source_id=%s", source_id)
         await add_worker_event(
@@ -85,7 +99,10 @@ async def process_one_feed_job(
             kind="channel_access",
             message=f"Не удалось проверить канал {chat_id}",
         )
-        return False
+        return PublishOutcome(
+            False,
+            "Не удалось проверить канал в Telegram (неверный канал или бот удалён из админов).",
+        )
 
     try:
         items = await parse_feed_entries(rss_url)
@@ -103,7 +120,7 @@ async def process_one_feed_job(
                 kind="rss_read",
                 message="Ошибка чтения ленты новостей",
             )
-            return False
+            return PublishOutcome(False, "Не удалось прочитать ленту новостей.")
         items = [fallback_feed_item]
 
     if not items:
@@ -114,7 +131,7 @@ async def process_one_feed_job(
         ):
             items = [fallback_feed_item]
         else:
-            return False
+            return PublishOutcome(False, "Лента новостей пуста или недоступна.")
 
     return await _publish_feed_item(
         bot,
@@ -138,7 +155,7 @@ async def _publish_feed_item(
     only_entry_key: str | None,
     force_repost: bool,
     fallback_feed_item: FeedItem | None = None,
-) -> bool:
+) -> PublishOutcome:
     source_id = int(job["source_id"])
     user_id = int(job["user_id"])
     chat_id = int(job["chat_id"])
@@ -152,9 +169,12 @@ async def _publish_feed_item(
             ):
                 item = fallback_feed_item
             else:
-                return False
+                return PublishOutcome(False, "Не удалось сопоставить запись с лентой.")
         if await is_entry_posted(source_id, item.entry_key) and not force_repost:
-            return False
+            return PublishOutcome(
+                False,
+                "Эта запись уже отмечена как опубликованная. Обнови черновик.",
+            )
     else:
         item = None
         for candidate in items:
@@ -162,7 +182,7 @@ async def _publish_feed_item(
                 item = candidate
                 break
         if item is None:
-            return False
+            return PublishOutcome(False, "В ленте нет новых неопубликованных записей.")
 
     if (
         item.link
@@ -177,58 +197,86 @@ async def _publish_feed_item(
             kind="duplicate_skip",
             message="Та же новость уже публиковалась (совпала ссылка)",
         )
-        return False
-
-    try:
-        rewritten = await rewrite_news_ru(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-            model=settings.openai_model,
-            title=item.title,
-            body=item.body_text,
+        return PublishOutcome(
+            False,
+            "Такая новость уже публиковалась у тебя (совпала ссылка с другим постом).",
         )
-    except Exception:
-        logger.exception("Ошибка ИИ source_id=%s", source_id)
-        await add_worker_event(
-            user_id=user_id,
-            source_id=source_id,
-            level="error",
-            kind="ai_rewrite",
-            message="Ошибка ИИ при пересказе",
-        )
-        return False
 
-    text = strip_urls(rewritten)
+    if not (settings.openai_api_key or "").strip():
+        if settings.openai_fallback_plain_text:
+            rewritten = f"{item.title}\n\n{item.body_text}"
+            ai_note = "⚠️ Нет OPENAI_API_KEY — публикуется текст из ленты без пересказа.\n\n"
+        else:
+            return PublishOutcome(
+                False,
+                "В .env не задан OPENAI_API_KEY. Добавь ключ или выставь OPENAI_FALLBACK_PLAIN_TEXT=1.",
+            )
+    else:
+        ai_note = ""
+        try:
+            rewritten = await rewrite_news_ru(
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url,
+                model=settings.openai_model,
+                title=item.title,
+                body=item.body_text,
+            )
+        except Exception as exc:
+            logger.exception("Ошибка ИИ source_id=%s", source_id)
+            await add_worker_event(
+                user_id=user_id,
+                source_id=source_id,
+                level="error",
+                kind="ai_rewrite",
+                message=f"Ошибка ИИ при пересказе: {exc}",
+            )
+            err_txt = str(exc).strip()
+            if len(err_txt) > 350:
+                err_txt = err_txt[:350] + "…"
+            if settings.openai_fallback_plain_text:
+                logger.warning(
+                    "ИИ недоступен, публикуем исходный текст: %s",
+                    err_txt,
+                )
+                rewritten = f"{item.title}\n\n{item.body_text}"
+                ai_note = (
+                    "⚠️ Пересказ ИИ недоступен — текст из ленты.\n"
+                    f"Причина: {err_txt}\n\n"
+                )
+            else:
+                return PublishOutcome(
+                    False,
+                    f"ИИ: {err_txt}\n\n"
+                    "Можно включить OPENAI_FALLBACK_PLAIN_TEXT=1 в .env — тогда при сбое ИИ "
+                    "в канал уйдёт текст из ленты без пересказа.",
+                )
+
+    text = sanitize_post_text(strip_urls(ai_note + rewritten))
     if not text.strip():
-        text = strip_urls(f"{item.title}\n\n{item.body_text}")
+        text = sanitize_post_text(strip_urls(f"{item.title}\n\n{item.body_text}"))
 
-    def _collect_image_urls() -> list[str]:
-        seen: set[str] = set()
-        out: list[str] = []
-        if item.image_url:
-            u = item.image_url.strip()
-            if u.startswith(("http://", "https://")) and u not in seen:
-                seen.add(u)
-                out.append(u)
-        if item.link:
-            try:
-                for u in fetch_article_image_urls(item.link):
-                    if u not in seen:
-                        seen.add(u)
-                        out.append(u)
-                        if len(out) >= 10:
-                            break
-            except Exception:
-                logger.debug("fetch_article_image_urls failed for %s", item.link, exc_info=True)
-        return out
+    body_for_images = sanitize_post_text(strip_urls(rewritten))[:8000]
 
     photo_ok = False
     if send_images:
-        image_urls = await asyncio.to_thread(_collect_image_urls)
+        api_key = (settings.openai_api_key or "").strip() or None
+        max_img = settings.post_max_images
+        use_llm_img = settings.post_image_llm_selection and bool(api_key)
+        image_urls = await resolve_final_image_urls(
+            item,
+            post_title=(item.title or "").strip(),
+            post_body=body_for_images,
+            api_key=api_key,
+            base_url=settings.openai_base_url,
+            model=settings.openai_model,
+            max_images=max_img,
+            use_llm_selection=use_llm_img,
+            web_fallback=settings.image_web_duckduckgo_fallback,
+        )
         if len(image_urls) > 1:
             try:
                 media: list[InputMediaPhoto] = []
-                for i, u in enumerate(image_urls[:10]):
+                for i, u in enumerate(image_urls[:max_img]):
                     if i == 0:
                         media.append(
                             InputMediaPhoto(
@@ -281,7 +329,10 @@ async def _publish_feed_item(
                 kind="send_message",
                 message=f"Ошибка отправки в канал {chat_id}",
             )
-            return False
+            return PublishOutcome(
+                False,
+                "Telegram не принял сообщение в канал (ограничение, длина текста или сеть).",
+            )
 
     await mark_entry_posted(source_id, item.entry_key)
     if item.link:
@@ -294,24 +345,36 @@ async def _publish_feed_item(
         kind="posted",
         message=f"Опубликована запись в канал {chat_id}",
     )
-    return True
+    return PublishOutcome(True)
 
 
 async def run_post_worker_loop(bot: Bot) -> None:
     """Фоновый цикл: новые записи из привязанных источников новостей → пересказ → канал."""
     await asyncio.sleep(5)
+    sem = asyncio.Semaphore(4)
+
+    async def _run_one(job: dict[str, object], st: object) -> None:
+        async with sem:
+            try:
+                await process_one_feed_job(bot, st, job)
+            except Exception:
+                logger.exception("Сбой задачи source_id=%s", job.get("source_id"))
+
     while True:
         settings = load_settings()
         interval = settings.poll_interval_sec
-        if not settings.openai_api_key:
-            logger.warning("OPENAI_API_KEY не задан — автопостинг отключён")
+        has_key = bool((settings.openai_api_key or "").strip())
+        if not has_key and not settings.openai_fallback_plain_text:
+            logger.warning(
+                "OPENAI_API_KEY не задан и OPENAI_FALLBACK_PLAIN_TEXT=0 — автопостинг отключён"
+            )
             await asyncio.sleep(interval)
             continue
 
         try:
             jobs = await list_feeding_jobs()
-            for job in jobs:
-                await process_one_feed_job(bot, settings, job)
+            if jobs:
+                await asyncio.gather(*(_run_one(j, settings) for j in jobs))
         except Exception:
             logger.exception("Сбой тика воркера")
 
