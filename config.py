@@ -26,10 +26,20 @@ class Settings:
     post_image_llm_selection: bool
     # Если на сайте мало подходящих — добрать через DuckDuckGo (пакет duckduckgo-search).
     image_web_duckduckgo_fallback: bool
+    # Если с сайта не удалось взять ни одной подходящей картинки — искать фото в интернете (имя игрока и т.д.).
+    image_web_if_no_site_images: bool
     # Второй проход ИИ: добить оставшийся английский в тексте поста (имена собственные не трогать).
     post_polish_english_to_russian: bool
     # Только картинки, одобренные ИИ по смыслу (без случайного «первого попавшегося»).
     post_image_semantic_only: bool
+    # Только иллюстрации со страницы статьи / ленты — без DuckDuckGo и веб-поиска.
+    post_image_site_only: bool
+    # Если ИИ не одобрил фото с сайта — проанализировать текст, взять главную мысль, искать фото в интернете.
+    post_image_web_after_ai_rejects_site: bool
+    # Прокси до api.telegram.org (если прямой доступ блокируется): socks5://host:port или http://...
+    telegram_proxy: str | None
+    # Таймаут HTTP-сессии aiogram (сек.); при медленном TLS можно поднять.
+    telegram_http_timeout: float
 
 
 def _load_dotenv_if_exists(path: Path) -> None:
@@ -83,11 +93,29 @@ def load_settings() -> Settings:
     img_web_raw = os.getenv("IMAGE_WEB_DUCKDUCKGO_FALLBACK", "0").strip().lower()
     image_web_duckduckgo_fallback = img_web_raw in ("1", "true", "yes", "on")
 
+    # По умолчанию вкл.: типичный случай — в ленте нет фото игрока, нужен поиск по имени.
+    web_empty_raw = os.getenv("POST_IMAGE_WEB_IF_NO_SITE_IMAGES", "1").strip().lower()
+    image_web_if_no_site_images = web_empty_raw in ("1", "true", "yes", "on")
+
     pol_en_raw = os.getenv("POST_POLISH_ENGLISH_TO_RUSSIAN", "1").strip().lower()
     post_polish_english_to_russian = pol_en_raw in ("1", "true", "yes", "on")
 
     sem_img_raw = os.getenv("POST_IMAGE_SEMANTIC_ONLY", "1").strip().lower()
     post_image_semantic_only = sem_img_raw in ("1", "true", "yes", "on")
+
+    # По умолчанию вкл.: фото только с сайта; выкл. — разрешить веб (POST_IMAGE_WEB…).
+    site_only_raw = os.getenv("POST_IMAGE_SITE_ONLY", "1").strip().lower()
+    post_image_site_only = site_only_raw in ("1", "true", "yes", "on")
+
+    web_reject_raw = os.getenv("POST_IMAGE_WEB_AFTER_AI_REJECTS_SITE", "1").strip().lower()
+    post_image_web_after_ai_rejects_site = web_reject_raw in ("1", "true", "yes", "on")
+
+    telegram_proxy = os.getenv("TELEGRAM_PROXY", "").strip() or None
+    tg_to_raw = os.getenv("TELEGRAM_HTTP_TIMEOUT_SEC", "90").strip()
+    try:
+        telegram_http_timeout = max(30.0, float(tg_to_raw))
+    except ValueError:
+        telegram_http_timeout = 90.0
 
     if not token:
         raise RuntimeError(
@@ -114,6 +142,11 @@ def load_settings() -> Settings:
         post_max_images=post_max_images,
         post_image_llm_selection=post_image_llm_selection,
         image_web_duckduckgo_fallback=image_web_duckduckgo_fallback,
+        image_web_if_no_site_images=image_web_if_no_site_images,
         post_polish_english_to_russian=post_polish_english_to_russian,
         post_image_semantic_only=post_image_semantic_only,
+        post_image_site_only=post_image_site_only,
+        post_image_web_after_ai_rejects_site=post_image_web_after_ai_rejects_site,
+        telegram_proxy=telegram_proxy,
+        telegram_http_timeout=telegram_http_timeout,
     )

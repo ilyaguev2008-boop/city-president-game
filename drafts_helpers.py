@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from post_content import BuiltPost
 from rss_entries import FeedItem, parse_feed_entries
 from db import is_entry_posted
 
@@ -21,6 +22,8 @@ class DraftPublishSnapshot:
 
     item: FeedItem
     kind: Literal["new", "repeat"]
+    # Готовый пересказ и отобранные фото — то же уйдёт в канал по «Опубликовать».
+    built: BuiltPost | None = None
 
 
 async def get_draft_suggestion(source_id: int, rss_url: str) -> DraftSuggestion | None:

@@ -11,6 +11,7 @@ from text_utils import (
     clean_title_for_post,
     normalize_cyrillic_news_prose,
     sanitize_post_text,
+    strip_llm_artifacts,
     strip_urls,
 )
 
@@ -64,7 +65,9 @@ NEWS_REWRITE_SYSTEM_RU = """Ты редактор новостей для Telegr
 - Не выдумывай факты, счёт, имена и цифры; если чего-то нет в тексте — не дополняй.
 - Сохраняй нейтральный или слегка оценочный тон, уместный для спортивной редакции (без токсичности и мата).
 - Убери призывы подписаться, рекламу, «читайте также», хлебные крошки, служебный мусор СМИ.
-- Не вставляй ссылки, URL и фразы вроде «читайте по ссылке»."""
+- Не вставляй ссылки, URL и фразы вроде «читайте по ссылке».
+- Пиши грамотным русским: не используй технические суффиксы вроде _high, _low; не порти слова бессмысленными
+  слогами; каждое предложение должно быть понятным читателю."""
 
 POLISH_ENGLISH_TO_RUSSIAN_SYSTEM_RU = """Ты редактор новостей для Telegram-канала.
 
@@ -101,6 +104,7 @@ async def polish_english_to_russian_ru(
         user_text=t,
         timeout_sec=timeout_sec,
         system_prompt=POLISH_ENGLISH_TO_RUSSIAN_SYSTEM_RU,
+        temperature=0.25,
     )
 
 SYSTEM_PROMPT_RU = """Ты дружелюбный AI-помощник для владельцев Telegram-каналов, которые используют бота автопостинга из своих источников новостей.
@@ -122,6 +126,7 @@ async def complete_chat(
     user_text: str,
     timeout_sec: int = 90,
     system_prompt: str | None = None,
+    temperature: float | None = None,
 ) -> str:
     """Вызывает Chat Completions API (OpenAI или совместимый сервер)."""
     url = base_url.rstrip("/") + "/v1/chat/completions"
@@ -136,7 +141,7 @@ async def complete_chat(
             {"role": "system", "content": system},
             {"role": "user", "content": user_text},
         ],
-        "temperature": 0.7,
+        "temperature": 0.7 if temperature is None else float(temperature),
         "max_tokens": 2000,
     }
 
@@ -196,9 +201,11 @@ async def rewrite_news_ru(
         user_text=user_text,
         timeout_sec=timeout_sec,
         system_prompt=NEWS_REWRITE_SYSTEM_RU,
+        temperature=0.35,
     )
     out = sanitize_post_text(raw)
     out = normalize_cyrillic_news_prose(out)
+    out = strip_llm_artifacts(out)
     if polish_english_translation and _text_needs_english_polish(out):
         try:
             polished = await polish_english_to_russian_ru(
@@ -210,6 +217,7 @@ async def rewrite_news_ru(
             )
             out = sanitize_post_text(polished)
             out = normalize_cyrillic_news_prose(out)
+            out = strip_llm_artifacts(out)
         except Exception:
             logger.warning("ИИ: не удалось довести перевод английского", exc_info=True)
     return out

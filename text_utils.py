@@ -105,6 +105,29 @@ def _is_junk_line(line: str) -> bool:
     return False
 
 
+def strip_llm_artifacts(text: str) -> str:
+    """
+    Убирает типичные артефакты моделей: прилипшие _high/_low, мусорные латинские хвосты у кириллицы.
+    """
+    if not text:
+        return ""
+    t = text
+    t = re.sub(
+        r"(?<=[а-яёА-Яё0-9])\.(_high|_low|_medium|_xlarge|_large|_small|_thumb)\b",
+        ".",
+        t,
+        flags=re.IGNORECASE,
+    )
+    t = re.sub(
+        r"(?<=[а-яёА-Яё0-9])(_high|_low|_medium|_xlarge|_large|_small)\b",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    )
+    t = re.sub(r" {2,}", " ", t)
+    return t.strip()
+
+
 def sanitize_post_text(text: str) -> str:
     """
     Чистит текст поста: невидимые символы, типичный редакционный мусор,
@@ -135,6 +158,7 @@ def sanitize_post_text(text: str) -> str:
     t = "\n".join(clean_whitespace(p) if p.strip() else "" for p in t.split("\n"))
     # Убираем пустые строки подряд > 2
     t = re.sub(r"\n{3,}", "\n\n", t)
+    t = strip_llm_artifacts(t)
     return t.strip()
 
 

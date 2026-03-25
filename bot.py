@@ -7,14 +7,24 @@ from html import escape
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.filters import Command, CommandStart, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    Message,
+    ReplyKeyboardMarkup,
+    URLInputFile,
+)
 
 from ai_service import complete_chat, split_for_telegram
 from channel_permissions import bot_can_post_to_channel
-from config import load_settings
+from config import Settings, load_settings
 from db import (
     add_channel,
     add_rss_source,
@@ -36,6 +46,7 @@ from db import (
     update_posting_settings,
 )
 from drafts_helpers import DraftPublishSnapshot, get_draft_suggestion
+from post_content import BuiltPost, build_feed_post_content
 from feed_discovery import resolve_to_feed_preview
 from rss_service import extract_feed_url_candidate, normalize_http_url
 from keyboards import (
@@ -46,6 +57,7 @@ from keyboards import (
     link_pick_channel_kb,
     link_pick_source_kb,
     main_menu_reply_kb,
+    post_once_confirm_kb,
     post_once_pick_kb,
     posting_settings_kb,
     source_delete_pick_kb,
@@ -54,11 +66,18 @@ from keyboards import (
 from post_worker import process_one_feed_job, run_post_worker_loop
 from rss_monitor import run_rss_monitor_loop
 from telegram_helpers import get_bot_user_id
+from text_utils import sanitize_post_text
 
 TG_LINK_RE = re.compile(r"^(?:https?://)?(?:t\.me/|telegram\.me/)?@?([A-Za-z0-9_]{5,})/?$", re.IGNORECASE)
 pending_action_by_user: dict[int, str] = {}
-# Что пользователь видит в «Черновике» — чтобы «Опубликовать» шло в тот же материал, а не в свежезагруженную ленту.
+# Что пользователь видит в «Черновике» — чтобы «Опубликовать» шло в тот же материал, а не в свежезамороженную ленту.
 draft_publish_target: dict[tuple[int, int], DraftPublishSnapshot] = {}
+# «Опубликовать 1 пост»: job + своё фото (file_id), если пользователь нажал «Изменить».
+post_once_pending: dict[int, dict[str, object]] = {}
+
+
+class PostOnceStates(StatesGroup):
+    wait_custom_photo = State()
 
 
 def _fallback_feed_title(norm_url: str) -> str:
@@ -69,7 +88,7 @@ def _fallback_feed_title(norm_url: str) -> str:
 
 
 def looks_like_single_line_site_url(text: str) -> bool:
-    """Одна строка, похожая на URL сайта или ленты (в т.ч. без https://)."""
+    """Одна строка, похожая на URL сайта или ленты (в т.ч. Без https://)."""
     if not (text or "").strip() or len(text) > 4000:
         return False
     cand = extract_feed_url_candidate(text)
@@ -145,7 +164,7 @@ def main_menu_text(name: str, *, key_hint: str) -> str:
         )
     return (
         f"Привет, {name}!\n\n"
-        "Это бот **автопостинга в Telegram-каналы**: материалы из **твоих** источников новостей "
+        "Это бот **авто постинга в Telegram-каналы**: материалы из **твоих** источников новостей "
         "(через ленту сайта), пересказ на русском, пост без лишних ссылок и с одной картинкой.\n\n"
         "**Источник новостей:** пришли в чат **одной строкой** ссылку на **сайт** (https://…) — бот "
         "попробует найти ленту сам. Или открой раздел «Источники новостей».\n\n"
@@ -215,9 +234,10 @@ async def render_drafts_list_html(user_id: int) -> str:
     lines: list[str] = [
         "<b>Черновики и очередь</b>",
         "",
-        "По каждому источнику показывается следующая <b>ещё не опубликованная</b> запись; "
-        "если в ленте всё уже было в канале — предлагается последняя сверху ленты "
-        "(можно снова опубликовать с пересказом). Нажми строку, чтобы открыть.",
+        "По каждому источнику — следующая <b>ещё не опубликованная</b> запись; "
+        "если в ленте всё уже было в канале — последняя сверху ленты. "
+        "«Пропустить» отмечает запись и открывает черновик <b>с другого источника</b> по кругу. "
+        "Нажми строку, чтобы открыть.",
         "",
     ]
     suggestions = await asyncio.gather(
@@ -247,17 +267,78 @@ async def render_drafts_list_html(user_id: int) -> str:
     return "\n".join(lines)
 
 
+def _html_for_edit_message(html: str, max_len: int = 4000) -> str:
+    """Telegram: до 4096 символов на сообщение; запас под закрывающие теги."""
+    if len(html) <= max_len:
+        return html
+    return html[: max_len - 40] + "\n\n<i>…текст обрезан (лимит Telegram)</i>"
+
+
+def _preview_photo_caption(post_text_plain: str | None) -> str:
+    """Подпись к превью-фото: тот же текст, что уйдёт в канал (лимит подписи Telegram 1024)."""
+    t = (post_text_plain or "").strip()
+    if not t:
+        return "📷 Текст поста пока пуст — в канал уйдёт только картинка (или добавь текст в «Изменить»)."
+    if len(t) <= 1024:
+        return t
+    return t[:1023] + "…"
+
+
+async def _send_compose_preview_footers(
+    message: Message,
+    kb: InlineKeyboardMarkup,
+    preview_urls: list[str],
+    *,
+    post_text_plain: str | None = None,
+) -> None:
+    """Фото-предпросмотр и/или строка с инлайн-кнопками под длинным текстом."""
+    st = load_settings()
+    mx = min(st.post_max_images, len(preview_urls)) if preview_urls else 0
+    urls = preview_urls[:mx] if preview_urls else []
+    cap = _preview_photo_caption(post_text_plain)
+    try:
+        if len(urls) == 1:
+            await message.answer_photo(
+                photo=URLInputFile(url=urls[0]),
+                caption=cap,
+                reply_markup=kb,
+            )
+        elif len(urls) > 1:
+            media = [
+                InputMediaPhoto(
+                    media=URLInputFile(url=urls[0]),
+                    caption=cap[:1024],
+                ),
+                *(InputMediaPhoto(media=URLInputFile(url=u)) for u in urls[1:]),
+            ]
+            await message.answer_media_group(media=media)
+            await message.answer(
+                "👇 <b>Действия с черновиком</b>",
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+        elif not urls:
+            await message.answer(
+                "👇 <b>📤 Опубликовать в канал</b> — кнопки ниже.",
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+    except Exception:
+        logging.exception("Предпросмотр фото черновика")
+
+
 async def compose_draft_detail(
     user_id: int, source_id: int
-) -> tuple[str, InlineKeyboardMarkup]:
-    """Текст черновика и клавиатура; одна выборка ленты на экран."""
+) -> tuple[str, InlineKeyboardMarkup, list[str]]:
+    """Текст черновика, клавиатура и URL предпросмотр, а фото; одна выборка ленты на экран."""
     row = await get_source_row(user_id, source_id)
     if not row:
-        return "<b>Черновик</b>\n\nИсточник не найден.", draft_detail_kb(source_id, can_skip=False)
+        return "<b>Черновик</b>\n\nИсточник не найден.", draft_detail_kb(source_id, can_skip=False), []
     if not row.get("channel_id"):
         return (
             "<b>Черновик</b>\n\nИсточник не привязан к каналу.",
             draft_detail_kb(source_id, can_skip=False),
+            [],
         )
     sug = await get_draft_suggestion(source_id, str(row["url"]))
     name = escape(str(row.get("feed_title") or "—"))
@@ -267,9 +348,7 @@ async def compose_draft_detail(
             f"<b>Черновик</b> · источник <b>#{source_id}</b> {name}\n"
             f"→ канал: {ch_t}\n\n<i>Лента пуста или недоступна.</i>"
         )
-        return html, draft_detail_kb(source_id, can_skip=False)
-    title = escape(sug.item.title)
-    body = escape(_truncate_plain(sug.item.body_text, 3500))
+        return html, draft_detail_kb(source_id, can_skip=False), []
     link = escape(sug.item.link) if sug.item.link else "—"
     if sug.kind == "repeat":
         note = (
@@ -278,22 +357,95 @@ async def compose_draft_detail(
         )
     else:
         note = ""
+
+    settings = load_settings()
+    ps = await get_posting_settings(user_id)
+    try:
+        built = await build_feed_post_content(
+            sug.item,
+            settings,
+            send_images=bool(ps["send_images"]),
+            polish_english=settings.post_polish_english_to_russian,
+        )
+        preview_urls = list(built.image_urls)
+    except Exception as exc:
+        logging.exception("Черновик: не удалось собрать готовый пост")
+        title = escape(sug.item.title)
+        body = escape(_truncate_plain(sug.item.body_text, 3500))
+        err = escape(str(exc)[:400])
+        html = (
+            f"<b>Черновик</b> · <b>#{source_id}</b> {name}\n"
+            f"→ канал: {ch_t}\n\n"
+            f"{note}"
+            f"<i>Не удалось подготовить пересказ:</i> {err}\n\n"
+            f"<b>{title}</b>\n\n{body}\n\n"
+            f"Ссылка: <code>{link}</code>"
+        )
+        draft_publish_target[(user_id, source_id)] = DraftPublishSnapshot(
+            item=sug.item,
+            kind=sug.kind,
+            built=None,
+        )
+        return html, draft_detail_kb(source_id, can_skip=(sug.kind == "new")), []
+
+    content_esc = escape(_truncate_plain(built.text, 3800))
+    tail = "…" if len(built.text) > 3800 else ""
+    feed_title_esc = escape(_truncate_plain(sug.item.title, 240))
     html = (
-        f"<b>Черновик</b> · <b>#{source_id}</b> {name}\n"
+        f"<b>Готовый черновик</b> · <b>#{source_id}</b> {name}\n"
         f"→ канал: {ch_t}\n\n"
         f"{note}"
-        f"<b>{title}</b>\n\n{body}\n\n"
+        f"<i>Заголовок в ленте:</i> {feed_title_esc}\n\n"
+        f"{content_esc}{tail}\n\n"
+        f"<i>Фото: {len(built.image_urls)} шт.</i>\n"
         f"Ссылка: <code>{link}</code>"
     )
     draft_publish_target[(user_id, source_id)] = DraftPublishSnapshot(
         item=sug.item,
         kind=sug.kind,
+        built=built,
     )
     kb = draft_detail_kb(
         source_id,
         can_skip=(sug.kind == "new"),
     )
-    return html, kb
+    return html, kb, preview_urls
+
+
+def _draft_source_ids_after_skip(linked: list[dict[str, object]], current_sid: int) -> list[int]:
+    """После «Пропустить»: сначала другие привязанные источники по кругу, затем текущий (следующая запись в той же ленте)."""
+    ids = [int(r["id"]) for r in linked]
+    if not ids:
+        return []
+    if current_sid not in ids:
+        return ids
+    i = ids.index(current_sid)
+    others = ids[i + 1 :] + ids[:i]
+    return others + [current_sid]
+
+
+async def _show_draft_view(callback: CallbackQuery, user_id: int, source_id: int) -> bool:
+    """Обновляет сообщение черновиком и превью фото. False — не удалось изменить текст сообщения."""
+    html, kb, preview_urls = await compose_draft_detail(user_id, source_id)
+    html_safe = _html_for_edit_message(html)
+    try:
+        await callback.message.edit_text(
+            html_safe,
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in (getattr(exc, "message", "") or str(exc)).lower():
+            return False
+    snap_d = draft_publish_target.get((user_id, source_id))
+    post_plain = (snap_d.built.text if snap_d and snap_d.built else "") or ""
+    await _send_compose_preview_footers(
+        callback.message,
+        kb,
+        preview_urls,
+        post_text_plain=post_plain,
+    )
+    return True
 
 
 async def render_channels_html(user_id: int, bot: Bot) -> str:
@@ -311,7 +463,7 @@ async def render_channels_html(user_id: int, bot: Bot) -> str:
     for row in rows:
         chat_id = int(row["chat_id"])
         title = escape(str(row["title"] or "Без названия"))
-        status = "⚪️"
+        "⚪️"
         try:
             member = await bot.get_chat_member(chat_id=chat_id, user_id=bot_uid)
             can_post = bot_can_post_to_channel(member)
@@ -439,14 +591,13 @@ async def add_channel_from_raw(message: Message, bot: Bot, raw: str) -> None:
 
     status = await message.answer("Сохраняю канал…")
     title = None
-    chat_id: int | None = None
     try:
         chat = await bot.get_chat(chat_ref)
         chat_id = int(chat.id)
         title = getattr(chat, "title", None)
     except Exception:  # noqa: BLE001
         if isinstance(chat_ref, int):
-            # По числовому ID всё равно сохраняем; статус прав покажем в «Мои каналы».
+            # По-числовому ID всё равно сохраняем; статус прав покажем в «Мои каналы».
             chat_id = chat_ref
         else:
             await status.edit_text(
@@ -455,10 +606,6 @@ async def add_channel_from_raw(message: Message, bot: Bot, raw: str) -> None:
                 parse_mode="HTML",
             )
             return
-
-    if chat_id is None:
-        await status.edit_text("Не удалось определить канал по ссылке.")
-        return
 
     cid = await add_channel(message.from_user.id, chat_id=chat_id, title=title)
     await _replace_message_with_screen(
@@ -480,7 +627,6 @@ async def run_add_feed_pipeline(message: Message, status: Message, raw: str) -> 
     # Не дублируем текст «Ищу ленту…» — иначе Telegram: message is not modified → падение.
     await _safe_edit_status(status, "Проверяю ленту новостей…")
     logging.info("feed add: user=%s url=%s", message.from_user.id, raw[:500])
-    preview = None
     try:
         preview = await asyncio.wait_for(resolve_to_feed_preview(raw), timeout=75.0)
     except asyncio.CancelledError:
@@ -1082,49 +1228,271 @@ async def source_delete_router(callback: CallbackQuery) -> None:
     )
 
 
-async def post_once_router(callback: CallbackQuery) -> None:
+async def post_once_router(callback: CallbackQuery, state: FSMContext) -> None:
     if not callback.data or not callback.message or not callback.from_user:
         return
     await ensure_user(callback.from_user.id)
     user_id = callback.from_user.id
     parts = (callback.data or "").split(":")
-    if len(parts) != 2 or parts[0] != "po" or not parts[1].isdigit():
+
+    if not parts or parts[0] != "po":
         await callback.answer()
         return
-    sid = int(parts[1])
-    settings = load_settings()
-    if not settings.openai_api_key:
-        await callback.answer("Нет ключа ИИ в .env", show_alert=True)
-        return
-    jid = await get_feed_job_for_user(user_id, sid)
-    if not jid:
-        await callback.answer("Источник не привязан или выключен", show_alert=True)
-        return
-    ps = await get_posting_settings(user_id)
-    if await get_daily_post_count(user_id) >= int(ps["max_posts_per_day"]):
-        await callback.answer("Достигнут лимит постов на сегодня", show_alert=True)
-        return
-    await callback.answer("Публикую…")
-    status = await callback.message.answer("Публикую одну запись…")
-    try:
-        outcome = await process_one_feed_job(
-            callback.bot, settings, jid, ignore_user_posting_rules=True
+
+    if len(parts) == 3 and parts[1] == "edit" and parts[2].isdigit():
+        sid = int(parts[2])
+        row = await get_source_row(user_id, sid)
+        if not row or not row.get("channel_id"):
+            await callback.answer("Нужна привязка к каналу", show_alert=True)
+            return
+        if draft_publish_target.get((user_id, sid)) is None:
+            await callback.answer(
+                "Сначала открой предпросмотр (выбери источник в списке).",
+                show_alert=True,
+            )
+            return
+        await state.set_state(PostOnceStates.wait_custom_photo)
+        await state.update_data(source_id=sid)
+        await callback.answer()
+        await callback.message.answer(
+            "✏️ Пришли <b>одно сообщение</b> с <b>фото</b> и подписью — подпись станет текстом поста в канале.\n\n"
+            "Если подписи не будет — в канал уйдёт текущий текст из предпросмотра.\n"
+            "/cancel — отмена.",
+            parse_mode="HTML",
+            reply_markup=main_menu_reply_kb(),
         )
-    except Exception:  # noqa: BLE001
-        logging.exception("post_once from button")
-        await status.edit_text("Ошибка при публикации.")
         return
-    await status.edit_text(
-        "Готово — проверь канал."
-        if outcome.ok
-        else (outcome.user_message or "Новых записей нет или лента пуста.")
+
+    if len(parts) == 3 and parts[1] == "pub" and parts[2].isdigit():
+        sid = int(parts[2])
+        settings = load_settings()
+        has_ai_key = bool((settings.openai_api_key or "").strip())
+        if not has_ai_key and not settings.openai_fallback_plain_text:
+            await callback.answer(
+                "Нужен OPENAI_API_KEY или включи OPENAI_FALLBACK_PLAIN_TEXT=1 в .env.",
+                show_alert=True,
+            )
+            return
+        jid = await get_feed_job_for_user(user_id, sid)
+        if not jid:
+            await callback.answer("Источник не привязан", show_alert=True)
+            return
+        ps = await get_posting_settings(user_id)
+        if await get_daily_post_count(user_id) >= int(ps["max_posts_per_day"]):
+            await callback.answer("Достигнут лимит постов на сегодня", show_alert=True)
+            return
+        row = await get_source_row(user_id, sid)
+        if not row:
+            await callback.answer("Источник не найден", show_alert=True)
+            return
+        snap = draft_publish_target.get((user_id, sid))
+        if not snap:
+            sug = await get_draft_suggestion(sid, str(row["url"]))
+            if not sug:
+                await callback.answer("Лента пуста или недоступна", show_alert=True)
+                return
+            snap = DraftPublishSnapshot(item=sug.item, kind=sug.kind)
+            draft_publish_target[(user_id, sid)] = snap
+        pend = post_once_pending.get(user_id)
+        if not pend or int(pend.get("source_id", -1)) != sid:
+            await callback.answer("Сначала открой предпросмотр записи.", show_alert=True)
+            return
+        override_fid = pend.get("override_photo_file_id")
+        has_photo = bool(
+            override_fid or (snap.built and snap.built.image_urls)
+        )
+        if not has_photo:
+            await callback.answer(
+                "В посте должно быть фото. Нажми «✏️ Изменить» и пришли фото с подписью.",
+                show_alert=True,
+            )
+            return
+        entry_key = snap.item.entry_key
+        kind = snap.kind
+        item_link = (snap.item.link or "").strip()
+        posted_already = await is_entry_posted(sid, entry_key)
+        force_repost = kind == "repeat" or posted_already
+        if item_link and not force_repost and await is_duplicate_article_for_user(user_id, item_link):
+            await mark_entry_posted(sid, entry_key)
+            draft_publish_target.pop((user_id, sid), None)
+            post_once_pending.pop(user_id, None)
+            await callback.answer(
+                "Эта новость уже публиковалась (совпала ссылка с другой публикацией).",
+                show_alert=True,
+            )
+            html = await render_sources_html(user_id)
+            await _replace_callback_screen(
+                callback,
+                html,
+                parse_mode="HTML",
+                reply_markup=sources_reply_kb(),
+            )
+            return
+        await callback.answer("Публикую…")
+        status = await callback.message.answer("Публикую в канал…")
+        oid = override_fid if isinstance(override_fid, str) else None
+        try:
+            outcome = await process_one_feed_job(
+                callback.bot,
+                settings,
+                jid,
+                ignore_user_posting_rules=True,
+                only_entry_key=entry_key,
+                force_repost=force_repost,
+                fallback_feed_item=snap.item,
+                prebuilt=snap.built,
+                user_photo_file_id=oid,
+            )
+        except Exception:  # noqa: BLE001
+            logging.exception("post_once publish")
+            await status.edit_text("Ошибка при публикации.")
+            return
+        if outcome.ok:
+            draft_publish_target.pop((user_id, sid), None)
+            post_once_pending.pop(user_id, None)
+        await status.edit_text(
+            "Готово — проверь канал."
+            if outcome.ok
+            else (outcome.user_message or "Не удалось опубликовать.")
+        )
+        html = await render_sources_html(user_id)
+        await _replace_callback_screen(
+            callback,
+            html,
+            parse_mode="HTML",
+            reply_markup=sources_reply_kb(),
+        )
+        return
+
+    if len(parts) == 2 and parts[1].isdigit():
+        sid = int(parts[1])
+        settings = load_settings()
+        has_ai_key = bool((settings.openai_api_key or "").strip())
+        if not has_ai_key and not settings.openai_fallback_plain_text:
+            await callback.answer(
+                "Нужен OPENAI_API_KEY или включи OPENAI_FALLBACK_PLAIN_TEXT=1 в .env.",
+                show_alert=True,
+            )
+            return
+        jid = await get_feed_job_for_user(user_id, sid)
+        if not jid:
+            await callback.answer("Источник не привязан или выключен", show_alert=True)
+            return
+        ps = await get_posting_settings(user_id)
+        if await get_daily_post_count(user_id) >= int(ps["max_posts_per_day"]):
+            await callback.answer("Достигнут лимит постов на сегодня", show_alert=True)
+            return
+        row = await get_source_row(user_id, sid)
+        if not row or not row.get("channel_id"):
+            await callback.answer("Нужна привязка к каналу", show_alert=True)
+            return
+        html, _draft_kb, preview_urls = await compose_draft_detail(user_id, sid)
+        snap = draft_publish_target.get((user_id, sid))
+        if not snap:
+            await callback.answer("Не удалось собрать запись", show_alert=True)
+            return
+        warn = ""
+        if not snap.built or not snap.built.image_urls:
+            warn = (
+                "⚠️ <b>Фото не подобрано автоматически.</b> "
+                "Чтобы опубликовать в канал, нажми «✏️ Изменить» и пришли фото с подписью.\n\n"
+            )
+        html_block = f"<b>Публикация одной записи</b>\n\n{warn}{html}"
+        html_safe = _html_for_edit_message(html_block)
+        kb = post_once_confirm_kb(sid)
+        post_once_pending[user_id] = {
+            "source_id": sid,
+            "job": jid,
+            "override_photo_file_id": None,
+        }
+        try:
+            await callback.message.edit_text(
+                html_safe,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in (getattr(exc, "message", "") or str(exc)).lower():
+                logging.exception("post_once: edit_text")
+                await callback.answer("Не удалось обновить сообщение.", show_alert=True)
+                return
+        await callback.answer()
+        snap_p = draft_publish_target.get((user_id, sid))
+        post_plain_p = (snap_p.built.text if snap_p and snap_p.built else "") or ""
+        await _send_compose_preview_footers(
+            callback.message,
+            kb,
+            preview_urls,
+            post_text_plain=post_plain_p,
+        )
+        return
+
+    await callback.answer()
+
+
+async def post_once_receive_custom_photo(message: Message, state: FSMContext) -> None:
+    if not message.photo or not message.from_user:
+        return
+    await ensure_user(message.from_user.id)
+    user_id = message.from_user.id
+    data = await state.get_data()
+    sid = data.get("source_id")
+    if not isinstance(sid, int):
+        await state.clear()
+        return
+    snap = draft_publish_target.get((user_id, sid))
+    if not snap or not snap.built:
+        await state.clear()
+        await message.answer("Сессия устарела. Открой снова «Опубликовать 1 пост».")
+        return
+    raw = (message.caption or "").strip()
+    text = sanitize_post_text(raw) if raw else ""
+    if not text:
+        text = snap.built.text
+    file_id = message.photo[-1].file_id
+    new_built = BuiltPost(
+        rewritten=snap.built.rewritten,
+        ai_note="",
+        text=text,
+        body_for_images=snap.built.body_for_images,
+        image_urls=[file_id],
     )
-    html = await render_sources_html(user_id)
-    await _replace_callback_screen(
-        callback,
-        html,
+    draft_publish_target[(user_id, sid)] = DraftPublishSnapshot(
+        item=snap.item,
+        kind=snap.kind,
+        built=new_built,
+    )
+    p = post_once_pending.setdefault(user_id, {})
+    p["source_id"] = sid
+    p["override_photo_file_id"] = file_id
+    jid = await get_feed_job_for_user(user_id, sid)
+    if jid:
+        p["job"] = jid
+    await state.clear()
+    cap_plain = text[:900] + ("…" if len(text) > 900 else "")
+    cap2 = f"✅ <b>Предпросмотр — так уйдёт в канал</b>\n\n{escape(cap_plain)}"
+    await message.answer_photo(
+        photo=file_id,
+        caption=cap2[:1024],
         parse_mode="HTML",
-        reply_markup=sources_reply_kb(),
+        reply_markup=post_once_confirm_kb(sid),
+    )
+
+
+async def post_once_cancel_cmd(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено. Можешь снова открыть «Опубликовать 1 пост».")
+
+
+async def post_once_state_need_photo(message: Message, state: FSMContext) -> None:
+    if not message.from_user:
+        return
+    if message.text and message.text.strip().startswith("/"):
+        return
+    await message.answer(
+        "Нужно отправить сообщение с **фотографией** (подпись к фото = текст поста). "
+        "Отмена: /cancel",
+        parse_mode="Markdown",
     )
 
 
@@ -1141,20 +1509,22 @@ async def draft_router(callback: CallbackQuery) -> None:
         if not row or not row.get("channel_id"):
             await callback.answer("Нужна привязка к каналу", show_alert=True)
             return
-        html, kb = await compose_draft_detail(user_id, sid)
-        await callback.message.edit_text(
-            html,
-            parse_mode="HTML",
-            reply_markup=kb,
-        )
+        if not await _show_draft_view(callback, user_id, sid):
+            logging.error("Черновик: не удалось обновить сообщение (edit_text)")
+            await callback.answer("Не удалось обновить сообщение.", show_alert=True)
+            return
         await callback.answer()
         return
 
     if len(parts) == 3 and parts[0] == "d" and parts[1] == "p" and parts[2].isdigit():
         sid = int(parts[2])
         settings = load_settings()
-        if not settings.openai_api_key:
-            await callback.answer("Нет ключа ИИ в .env", show_alert=True)
+        has_ai_key = bool((settings.openai_api_key or "").strip())
+        if not has_ai_key and not settings.openai_fallback_plain_text:
+            await callback.answer(
+                "Нужен OPENAI_API_KEY или включи OPENAI_FALLBACK_PLAIN_TEXT=1 в .env.",
+                show_alert=True,
+            )
             return
         jid = await get_feed_job_for_user(user_id, sid)
         if not jid:
@@ -1179,7 +1549,7 @@ async def draft_router(callback: CallbackQuery) -> None:
         entry_key = snap.item.entry_key
         kind = snap.kind
         item_link = (snap.item.link or "").strip()
-        # Тот же материал, что на экране; если автопост уже выложил эту запись — всё равно шлём пересказ снова.
+        # Тот же материал, что на экране; если авто пост уже выложил эту запись — всё равно шлём пересказ снова.
         posted_already = await is_entry_posted(sid, entry_key)
         force_repost = kind == "repeat" or posted_already
         if item_link and not force_repost and await is_duplicate_article_for_user(user_id, item_link):
@@ -1215,6 +1585,7 @@ async def draft_router(callback: CallbackQuery) -> None:
                 only_entry_key=entry_key,
                 force_repost=force_repost,
                 fallback_feed_item=snap.item,
+                prebuilt=snap.built,
             )
         except Exception:  # noqa: BLE001
             logging.exception("draft post")
@@ -1260,13 +1631,33 @@ async def draft_router(callback: CallbackQuery) -> None:
             )
             return
         await mark_entry_posted(sid, sug.item.entry_key)
+        draft_publish_target.pop((user_id, sid), None)
         await callback.answer("Пропущено")
-        html, kb = await compose_draft_detail(user_id, sid)
-        await callback.message.edit_text(
-            html,
-            parse_mode="HTML",
-            reply_markup=kb,
-        )
+        rows = await list_rss_sources(user_id)
+        linked = _linked_sources(rows)
+        order = _draft_source_ids_after_skip(linked, sid)
+        for cand in order:
+            row_c = await get_source_row(user_id, cand)
+            if not row_c or not row_c.get("channel_id"):
+                continue
+            if not await get_draft_suggestion(cand, str(row_c["url"])):
+                continue
+            if await _show_draft_view(callback, user_id, cand):
+                return
+        html = await render_drafts_list_html(user_id)
+        if linked:
+            await callback.message.edit_text(
+                html,
+                parse_mode="HTML",
+                reply_markup=drafts_list_kb(linked),
+            )
+        else:
+            await _replace_callback_screen(
+                callback,
+                html,
+                parse_mode="HTML",
+                reply_markup=main_menu_reply_kb(),
+            )
         return
 
     await callback.answer()
@@ -1288,7 +1679,7 @@ async def posting_settings_router(callback: CallbackQuery) -> None:
         cfg = load_settings()
         if parts[2] == "auto" and not cfg.allow_auto_posting:
             await callback.answer(
-                "Автопост в канал отключён. Добавь в .env ALLOW_AUTO_POSTING=1 и перезапусти бота.",
+                "Авто пост в канал отключён. Добавь в .env ALLOW_AUTO_POSTING=1 и перезапусти бота.",
                 show_alert=True,
             )
             return
@@ -1338,13 +1729,25 @@ async def posting_settings_router(callback: CallbackQuery) -> None:
     )
 
 
+def _telegram_http_session(settings: Settings) -> AiohttpSession:
+    """Сессия для Bot API: опциональный прокси и таймаут (см. TELEGRAM_* в .env)."""
+    timeout = float(settings.telegram_http_timeout)
+    if settings.telegram_proxy:
+        return AiohttpSession(proxy=settings.telegram_proxy, timeout=timeout)
+    return AiohttpSession(timeout=timeout)
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
     settings = load_settings()
+    if settings.telegram_proxy:
+        logging.getLogger(__name__).info(
+            "TELEGRAM_PROXY задан — запросы к Bot API идут через прокси."
+        )
     await init_db()
 
-    bot = Bot(token=settings.bot_token)
+    bot = Bot(token=settings.bot_token, session=_telegram_http_session(settings))
     dp = Dispatcher(storage=MemoryStorage())
 
     asyncio.create_task(run_post_worker_loop(bot))
@@ -1359,10 +1762,46 @@ async def main() -> None:
     dp.callback_query.register(channels_router, F.data.startswith("ch:"))
     dp.callback_query.register(sources_router, F.data.startswith("src:"))
     dp.callback_query.register(posting_settings_router, F.data.startswith("ps:"))
+    dp.message.register(
+        post_once_receive_custom_photo,
+        StateFilter(PostOnceStates.wait_custom_photo),
+        F.photo,
+    )
+    dp.message.register(
+        post_once_cancel_cmd,
+        StateFilter(PostOnceStates.wait_custom_photo),
+        Command("cancel"),
+    )
+    dp.message.register(
+        post_once_state_need_photo,
+        StateFilter(PostOnceStates.wait_custom_photo),
+        F.text,
+    )
     dp.message.register(on_text_message, F.text & ~F.text.startswith("/"))
 
     # Иначе Telegram отдаёт Conflict, если у бота остался webhook или второй процесс polling.
-    await bot.delete_webhook(drop_pending_updates=True)
+    log = logging.getLogger(__name__)
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        me = await bot.get_me()
+    except TelegramNetworkError as exc:
+        await bot.session.close()
+        log.error(
+            "Нет связи с Telegram API (api.telegram.org). Типично: блокировка, фаервол или нужен VPN.\n"
+            "Что сделать: включи VPN с доступом к Telegram ИЛИ добавь в .env строку\n"
+            "  TELEGRAM_PROXY=socks5://127.0.0.1:ПОРТ\n"
+            "(порт возьми из настроек прокси VPN-клиента; для http-прокси — http://...).\n"
+            "Нужен пакет: pip install aiohttp-socks\n"
+            "Детали ошибки: %s",
+            exc,
+        )
+        raise SystemExit(1) from exc
+
+    log.info(
+        "Telegram: polling для @%s (id=%s). Дальше логов по умолчанию мало — бот ждёт сообщения.",
+        me.username or "—",
+        me.id,
+    )
     await dp.start_polling(bot)
 
 

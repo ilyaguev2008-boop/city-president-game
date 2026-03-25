@@ -73,6 +73,35 @@ _BAD_SUBSTR = (
     "-min.",
 )
 # Высокое разрешение / главное фото
+# Явные признаки другого вида спорта / не фото матча (часто попадают в выдачу CDN)
+_CONFLICT_SPORT_PATH_HINTS = (
+    "/hockey/",
+    "-hockey",
+    "hockey/",
+    "/nhl/",
+    "nhl.",
+    "-nhl-",
+    "/khl/",
+    "khl.",
+    "ice-hockey",
+    "ice_hockey",
+    "puck",
+    "figure-skating",
+    "biathlon",
+    "curling",
+    "stanley-cup",
+    "/nba/",
+    "-nba-",
+    "/nfl/",
+    "/mlb/",
+)
+
+
+def is_likely_conflicting_sport_asset(url: str) -> bool:
+    low = (url or "").lower()
+    return any(h in low for h in _CONFLICT_SPORT_PATH_HINTS)
+
+
 _GOOD_SUBSTR = (
     "1200",
     "1280",
@@ -150,6 +179,9 @@ def score_image_url_quality(url: str) -> float:
         s += 2.0
     elif ".png" in low:
         s += 1.0
+    for h in _CONFLICT_SPORT_PATH_HINTS:
+        if h in low:
+            s -= 45.0
     return s
 
 
@@ -326,6 +358,7 @@ async def select_image_indices_with_llm(
         user_text=user,
         timeout_sec=60,
         system_prompt=system,
+        temperature=0.35,
     )
     idx_list = _parse_indices_json(raw, max_pick=max_pick)
     valid = {i for i, _ in numbered_urls}
@@ -360,7 +393,125 @@ def _parse_indices_json(raw: str, *, max_pick: int) -> list[int]:
     return out
 
 
-async def suggest_web_image_search_query(
+def _parse_keep_indices_json(raw: str) -> list[int] | None:
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        raw = raw[start : end + 1]
+    try:
+        data: Any = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    keep = data.get("keep")
+    if not isinstance(keep, list):
+        return None
+    out: list[int] = []
+    for x in keep:
+        if isinstance(x, int):
+            out.append(x)
+        elif isinstance(x, float) and x == int(x):
+            out.append(int(x))
+    return out
+
+
+async def veto_image_urls_against_story(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    title: str,
+    post_text: str,
+    urls: list[str],
+) -> list[str]:
+    """
+    Второй проход ИИ: отсечь картинки, явно не подходящие к теме поста (другой спорт и т.п.).
+    """
+    if not urls:
+        return []
+    from ai_service import complete_chat
+
+    block = "\n".join(f"{i}. {u}" for i, u in enumerate(urls, start=1))
+    system = (
+        "Ты строгий редактор иллюстраций к посту в Telegram.\n"
+        "По заголовку, тексту поста и строкам URL (домен, путь, имя файла) определи, какие картинки "
+        "однозначно не подходят к теме: другой вид спорта (например хоккей/шайба/NHL, если пост про футбол), "
+        "посторонняя тема, явный мусор. Если сомневаешься — оставь URL.\n"
+        "Фото из интернет-поиска часто идут с «нейтральными» URL без имени в пути — это нормально, "
+        "если пост про конкретного игрока и кадр может быть им.\n"
+        "Верни только JSON: {\"keep\":[номера из списка 1,2,...]} — подмножество исходных позиций."
+    )
+    user = f"Заголовок:\n{title}\n\nТекст поста:\n{post_text[:5500]}\n\nНумерованные URL:\n{block}"
+    raw = await complete_chat(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        user_text=user,
+        timeout_sec=50,
+        system_prompt=system,
+        temperature=0.12,
+    )
+    indices = _parse_keep_indices_json(raw)
+    if indices is None:
+        logger.warning("ИИ-вето картинок: не JSON — оставляем отбор без вето")
+        return urls
+    if not indices:
+        return []
+    kept: list[str] = []
+    seen: set[str] = set()
+    for i in indices:
+        if isinstance(i, int) and 1 <= i <= len(urls):
+            u = urls[i - 1]
+            if u not in seen:
+                seen.add(u)
+                kept.append(u)
+    return kept
+
+
+def _heuristic_image_search_query(title: str, post_text: str) -> str | None:
+    """Если ИИ не дал строку — пробуем вытащить имя латиницей (игроки, тренеры)."""
+    blob = f"{title or ''} {post_text or ''}"
+    # «Имя Фамилия» латиницей подряд
+    m = re.search(
+        r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b",
+        blob[:2500],
+    )
+    if not m:
+        return None
+    name = m.group(1).strip()
+    if len(name) < 6:
+        return None
+    low = blob.lower()
+    sport_hit = any(
+        x in low
+        for x in (
+            "футбол",
+            "football",
+            "serie a",
+            "juventus",
+            "ювентус",
+            "матч",
+            "гол",
+            "клуб",
+            "liga",
+            "league",
+            "champions",
+            "лига",
+            "поле",
+            "игрок",
+            "команда",
+        )
+    )
+    if sport_hit:
+        return f"{name} football player"
+    return f"{name} photo"
+
+
+async def suggest_image_query_main_idea_from_post(
     *,
     api_key: str,
     base_url: str,
@@ -368,25 +519,31 @@ async def suggest_web_image_search_query(
     title: str,
     post_text: str,
 ) -> str | None:
-    """Короткий запрос для поиска фото в интернете (имя, событие)."""
+    """
+    После того как ИИ отклонил все картинки с сайта: кратко выделить главную мысль материала
+    и сформировать одну строку поиска для картинок в интернете.
+    """
     from ai_service import complete_chat
 
     system = (
-        "Сформируй одну короткую строку поиска картинок в интернете по сути новости "
-        "(имя человека + роль/контекст, или название события + место). "
-        "Латиница или кириллица — как уместнее для поиска. "
-        "Без кавычек. Не больше 100 символов. "
-        "Если для иллюстрации нет конкретного объекта — верни пустую строку в JSON: "
-        '{"q":""}'
+        "Ты редактор новостного Telegram-канала. Прочитай заголовок и текст поста.\n"
+        "1) Сформулируй внутренне одну **главную мысль** — о чём этот материал (кто, что случилось, какая тема).\n"
+        "2) Составь **одну короткую строку поиска** для поисковика картинок (DuckDuckGo Images): "
+        "ключевые сущности **латиницей** там, где это уместно (имена людей, клубы, города, лиги), "
+        "плюс 1–3 слова контекста (например football, stadium, coach, match), чтобы найти **реалистичное фото**, "
+        "а не абстракцию. Без общих фраз типа «новости», «интересное», «событие».\n"
+        "Если главная мысль — конкретный человек, строка должна позволить найти его **портрет или кадр с матча**.\n"
+        "До 120 символов, без кавычек. Ответ строго JSON: {\"q\":\"...\"} или {\"q\":\"\"} только если невозможно сформулировать."
     )
-    user = f"Заголовок:\n{title}\n\nТекст:\n{post_text[:4000]}"
+    user = f"Заголовок:\n{title}\n\nТекст поста:\n{post_text[:4500]}"
     raw = await complete_chat(
         api_key=api_key,
         base_url=base_url,
         model=model,
         user_text=user,
-        timeout_sec=40,
+        timeout_sec=50,
         system_prompt=system,
+        temperature=0.2,
     )
     raw = (raw or "").strip()
     start = raw.find("{")
@@ -398,9 +555,148 @@ async def suggest_web_image_search_query(
         q = data.get("q") if isinstance(data, dict) else None
         if isinstance(q, str):
             q = q.strip()
-            return q[:120] if q else None
+            if len(q) >= 3:
+                return q[:120]
     except json.JSONDecodeError:
         pass
+    return None
+
+
+async def fetch_web_image_urls_after_site_reject(
+    *,
+    post_title: str,
+    post_body: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    max_images: int,
+) -> list[str]:
+    """
+    ИИ не одобрил картинки с сайта: главная мысль → DuckDuckGo → смысловой отбор / эвристика.
+    """
+    key = (api_key or "").strip()
+    if not key:
+        return []
+    q = await suggest_image_query_main_idea_from_post(
+        api_key=key,
+        base_url=base_url,
+        model=model,
+        title=post_title,
+        post_text=post_body,
+    )
+    if not q:
+        q = await suggest_web_image_search_query(
+            api_key=key,
+            base_url=base_url,
+            model=model,
+            title=post_title,
+            post_text=post_body,
+        )
+    if not q:
+        q = _heuristic_image_search_query(post_title, post_body)
+    if not q:
+        return []
+    logger.info(
+        "Фото из интернета: ИИ не оставил картинок с сайта — поиск DDG по запросу: %s",
+        q[:160] + ("…" if len(q) > 160 else ""),
+    )
+    web = await duckduckgo_image_urls(q, max_results=max(max_images * 3, 12))
+    if not web:
+        logger.debug("web images after site reject: DDG пусто для q=%s", q[:80])
+        return []
+    web_chosen = await pick_image_urls_by_semantics(
+        candidates=web,
+        post_title=post_title,
+        post_body=post_body,
+        api_key=key,
+        base_url=base_url,
+        model=model,
+        max_images=max_images,
+    )
+    if web_chosen:
+        return web_chosen
+    relaxed = heuristic_top_image_urls_relaxed(web, max_images)
+    return relaxed
+
+
+async def suggest_web_image_search_query(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    title: str,
+    post_text: str,
+) -> str | None:
+    """Короткий запрос для поиска фото в интернете (имя игрока, клуб, событие)."""
+    from ai_service import complete_chat
+
+    system = (
+        "Сформируй одну строку поиска для поисковика картинок (Google/DuckDuckGo Images).\n"
+        "Критично: если в материале главный герой — **конкретный человек** (игрок, тренер), "
+        "строка должна содержать его **имя на латинице** в общепринятом написании (как в СМИ), "
+        "плюс контекст: football / soccer, клуб (Juventus, Milan…), сезон или «player» — чтобы "
+        "нашлись **портреты и фото с матчей**, а не случайные картинки.\n"
+        "Примеры хороших запросов: «Arkadiusz Milik Juventus football», «Milik Juventus 2024 player».\n"
+        "Если главный объект — не человек, а событие/место — укажи это кратко.\n"
+        "Без кавычек, до 120 символов. Не возвращай пустую q, если в тексте явно есть персона для иллюстрации.\n"
+        "Ответ только JSON: {\"q\":\"...\"} или {\"q\":\"\"} только если реально нечего искать."
+    )
+    user = f"Заголовок:\n{title}\n\nТекст:\n{post_text[:4000]}"
+    raw = await complete_chat(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        user_text=user,
+        timeout_sec=45,
+        system_prompt=system,
+        temperature=0.2,
+    )
+    raw = (raw or "").strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        raw = raw[start : end + 1]
+    try:
+        data = json.loads(raw)
+        q = data.get("q") if isinstance(data, dict) else None
+        if isinstance(q, str):
+            q = q.strip()
+            if q:
+                return q[:120]
+    except json.JSONDecodeError:
+        pass
+    hq = _heuristic_image_search_query(title, post_text)
+    if hq:
+        return hq
+    # Русский текст без явных латинских ФИО — отдельный короткий запрос
+    if re.search(r"[а-яёА-Яё]{5,}", (title or "") + (post_text or "")[:800]):
+        try:
+            raw2 = await complete_chat(
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                user_text=f"Заголовок:\n{title}\n\nТекст:\n{post_text[:2500]}",
+                timeout_sec=35,
+                system_prompt=(
+                    "Новость на русском о спорте (часто футбол). Определи главного героя — игрока или тренера. "
+                    "Верни только JSON: {\"q\":\"строка поиска фото в интернете\"} — "
+                    "латиницей имя и фамилию как в международной спортивной транскрипции, плюс football/soccer и клуб "
+                    "(Juventus, Milan и т.д.), если есть в тексте. "
+                    "Если персона не человек или не ясно — {\"q\":\"\"}."
+                ),
+                temperature=0.15,
+            )
+            raw2 = (raw2 or "").strip()
+            s2 = raw2.find("{")
+            e2 = raw2.rfind("}")
+            if s2 >= 0 and e2 > s2:
+                raw2 = raw2[s2 : e2 + 1]
+            data2 = json.loads(raw2)
+            q2 = data2.get("q") if isinstance(data2, dict) else None
+            if isinstance(q2, str) and q2.strip():
+                return q2.strip()[:120]
+        except Exception:
+            logger.debug("второй ИИ-запрос строки поиска фото", exc_info=True)
     return None
 
 
@@ -462,6 +758,20 @@ def heuristic_top_image_urls(raw_candidates: list[str], max_images: int) -> list
     return ranked[:max_images] if ranked else []
 
 
+def heuristic_top_image_urls_relaxed(raw_candidates: list[str], max_images: int) -> list[str]:
+    """
+    Как heuristic_top_image_urls, но если фильтр по 720p убрал все кадры со страницы —
+    всё равно берём лучшие по эвристике URL с сайта (обязательное фото из статьи).
+    """
+    if not raw_candidates:
+        return []
+    ranked = dedupe_sort_candidates(raw_candidates)
+    hi = prefer_high_resolution_candidates(ranked)
+    if hi:
+        return hi[:max_images]
+    return ranked[:max_images]
+
+
 async def pick_image_urls_by_semantics(
     *,
     candidates: list[str],
@@ -491,6 +801,20 @@ async def pick_image_urls_by_semantics(
         max_pick=max_images,
     )
     chosen = [top[i - 1] for i in picked if 1 <= i <= len(top)]
+    chosen = [u for u in chosen if not is_likely_conflicting_sport_asset(u)]
+    if not chosen:
+        return []
+    try:
+        chosen = await veto_image_urls_against_story(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            title=post_title,
+            post_text=post_body,
+            urls=chosen,
+        )
+    except Exception:
+        logger.warning("ИИ-вето картинок не удалось — оставляем отбор без второго прохода", exc_info=True)
     return chosen[:max_images]
 
 
@@ -505,11 +829,15 @@ async def resolve_final_image_urls(
     max_images: int,
     use_llm_selection: bool,
     web_fallback: bool,
+    web_if_no_site_images: bool = True,
     semantic_only: bool = True,
+    site_only: bool = False,
+    web_after_ai_rejects_site: bool = True,
 ) -> list[str]:
     """
     Итог: 0..max_images URL для отправки в Telegram.
-    При включённом смысловом режиме и semantic_only не подставляются случайные URL без одобрения ИИ.
+    Если ИИ не одобрил картинки с сайта и включён web_after_ai_rejects_site — анализ текста (главная мысль)
+    и поиск иллюстрации в интернете. site_only отключает только «старый» веб-фолбэк, но не этот шаг.
     """
     raw = collect_candidate_image_urls(item)
     key = (api_key or "").strip()
@@ -527,8 +855,19 @@ async def resolve_final_image_urls(
             )
             if chosen:
                 return chosen
-            # ИИ не нашёл уместных среди сайта — пробуем веб с тем же смысловым отбором
-            if web_fallback:
+            if web_after_ai_rejects_site:
+                web_out = await fetch_web_image_urls_after_site_reject(
+                    post_title=post_title,
+                    post_body=post_body,
+                    api_key=key,
+                    base_url=base_url,
+                    model=model,
+                    max_images=max_images,
+                )
+                if web_out:
+                    return web_out
+            try_web = (web_fallback or web_if_no_site_images) and not site_only
+            if try_web:
                 q = await suggest_web_image_search_query(
                     api_key=key,
                     base_url=base_url,
@@ -551,17 +890,34 @@ async def resolve_final_image_urls(
                     )
                     if web_chosen:
                         return web_chosen
-            if semantic_only:
-                return []
-            return heuristic_top_image_urls(raw, max_images)
+                    wr = heuristic_top_image_urls_relaxed(web, max_images)
+                    if wr:
+                        return wr
+            if raw:
+                return heuristic_top_image_urls_relaxed(raw, max_images)
+            return []
         except Exception:
             logger.warning(
                 "ИИ-отбор картинок по смыслу не удался",
                 exc_info=True,
             )
-            if semantic_only:
-                return []
-            return heuristic_top_image_urls(raw, max_images)
+            if web_after_ai_rejects_site and key:
+                try:
+                    web_out = await fetch_web_image_urls_after_site_reject(
+                        post_title=post_title,
+                        post_body=post_body,
+                        api_key=key,
+                        base_url=base_url,
+                        model=model,
+                        max_images=max_images,
+                    )
+                    if web_out:
+                        return web_out
+                except Exception:
+                    logger.debug("веб после сбоя отбора с сайта", exc_info=True)
+            if raw:
+                return heuristic_top_image_urls_relaxed(raw, max_images)
+            return []
 
-    # Без ключа или отключён смысловой отбор — эвристика
-    return heuristic_top_image_urls(raw, max_images)
+    # Без ключа или отключён смысловой отбор — эвристика со страницы
+    return heuristic_top_image_urls_relaxed(raw, max_images)

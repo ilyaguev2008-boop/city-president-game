@@ -180,6 +180,25 @@ def post_once_pick_kb(linked: list[dict[str, object]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=lines)
 
 
+def post_once_confirm_kb(source_id: int) -> InlineKeyboardMarkup:
+    """После предпросмотра: публикация в канал или своя фото+текст."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📤 Опубликовать в канал",
+                    callback_data=f"po:pub:{source_id}",
+                ),
+                InlineKeyboardButton(
+                    text="✏️ Изменить",
+                    callback_data=f"po:edit:{source_id}",
+                ),
+            ],
+            [InlineKeyboardButton(text="« К выбору источника", callback_data="src:post_once")],
+        ]
+    )
+
+
 def drafts_list_kb(linked: list[dict[str, object]]) -> InlineKeyboardMarkup:
     lines: list[list[InlineKeyboardButton]] = []
     for r in linked:
@@ -199,10 +218,15 @@ def draft_detail_kb(
     can_skip: bool = True,
 ) -> InlineKeyboardMarkup:
     row1: list[InlineKeyboardButton] = [
-        InlineKeyboardButton(text="Опубликовать", callback_data=f"d:p:{source_id}"),
+        InlineKeyboardButton(
+            text="📤 Опубликовать в канал",
+            callback_data=f"d:p:{source_id}",
+        ),
     ]
     if can_skip:
-        row1.append(InlineKeyboardButton(text="Пропустить", callback_data=f"d:k:{source_id}"))
+        row1.append(
+            InlineKeyboardButton(text="⏭ Пропустить запись", callback_data=f"d:k:{source_id}")
+        )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             row1,
