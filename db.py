@@ -100,6 +100,26 @@ CREATE TABLE IF NOT EXISTS user_daily_posts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_daily_day ON user_daily_posts (day);
+
+CREATE TABLE IF NOT EXISTS news_inbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users (user_id) ON DELETE CASCADE,
+    source_id INTEGER NOT NULL REFERENCES rss_sources (id) ON DELETE CASCADE,
+    entry_key TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    link TEXT NOT NULL DEFAULT '',
+    body_text TEXT NOT NULL DEFAULT '',
+    image_url TEXT,
+    published_at TEXT,
+    discovered_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, source_id, entry_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_news_inbox_user_sort ON news_inbox (
+    user_id,
+    published_at DESC,
+    discovered_at DESC
+);
 """
 
 
@@ -166,6 +186,33 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
             """
         )
         await conn.execute("PRAGMA user_version = 2")
+
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS news_inbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users (user_id) ON DELETE CASCADE,
+            source_id INTEGER NOT NULL REFERENCES rss_sources (id) ON DELETE CASCADE,
+            entry_key TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            link TEXT NOT NULL DEFAULT '',
+            body_text TEXT NOT NULL DEFAULT '',
+            image_url TEXT,
+            published_at TEXT,
+            discovered_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (user_id, source_id, entry_key)
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_news_inbox_user_sort ON news_inbox (
+            user_id,
+            published_at DESC,
+            discovered_at DESC
+        )
+        """
+    )
 
 
 async def init_db() -> None:
@@ -387,27 +434,11 @@ async def add_worker_event(
 
 
 async def list_feeding_jobs() -> list[dict[str, object]]:
-    """Источники с привязанным каналом для фоновой публикации."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA foreign_keys = ON")
-        cur = await db.execute(
-            """
-            SELECT rss_sources.id, rss_sources.user_id, rss_sources.url, channels.chat_id
-            FROM rss_sources
-            INNER JOIN channels ON channels.id = rss_sources.channel_id
-            WHERE rss_sources.enabled = 1
-            """,
-        )
-        rows = await cur.fetchall()
-    return [
-        {
-            "source_id": r[0],
-            "user_id": r[1],
-            "rss_url": r[2],
-            "chat_id": r[3],
-        }
-        for r in rows
-    ]
+    """
+    Фоновая публикация из RSS в канал отключена: канал выбирается вручную при отправке черновика.
+    Воркер остаётся в цикле, но задач без ручного сценария нет.
+    """
+    return []
 
 
 async def list_rss_sources_for_monitor() -> list[dict[str, object]]:
@@ -473,7 +504,7 @@ async def upsert_rss_monitor_state(
 
 
 async def get_feed_job_for_user(user_id: int, source_id: int) -> dict[str, object] | None:
-    """Один источник пользователя с привязанным каналом (для ручной публикации)."""
+    """Один источник пользователя с привязанным каналом (для авто-поста и совместимости)."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA foreign_keys = ON")
         cur = await db.execute(
@@ -486,6 +517,37 @@ async def get_feed_job_for_user(user_id: int, source_id: int) -> dict[str, objec
               AND rss_sources.id = ?
             """,
             (user_id, source_id),
+        )
+        row = await cur.fetchone()
+    if not row:
+        return None
+    return {
+        "source_id": row[0],
+        "user_id": row[1],
+        "rss_url": row[2],
+        "chat_id": row[3],
+    }
+
+
+async def get_manual_publish_job(
+    user_id: int, source_id: int, channel_row_id: int
+) -> dict[str, object] | None:
+    """
+    Ручная публикация: включённый источник + любой канал пользователя (внутренний id из таблицы channels).
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            """
+            SELECT rss.id, rss.user_id, rss.url, ch.chat_id
+            FROM rss_sources rss
+            INNER JOIN channels ch
+              ON ch.id = ? AND ch.user_id = rss.user_id
+            WHERE rss.user_id = ?
+              AND rss.id = ?
+              AND rss.enabled = 1
+            """,
+            (channel_row_id, user_id, source_id),
         )
         row = await cur.fetchone()
     if not row:
@@ -512,14 +574,6 @@ async def get_user_stats(user_id: int) -> dict[str, int]:
         n_src = int((await cur.fetchone())[0])
         cur = await db.execute(
             """
-            SELECT COUNT(*) FROM rss_sources
-            WHERE user_id = ? AND channel_id IS NOT NULL AND enabled = 1
-            """,
-            (user_id,),
-        )
-        n_linked = int((await cur.fetchone())[0])
-        cur = await db.execute(
-            """
             SELECT COUNT(*) FROM posted_entries pe
             INNER JOIN rss_sources rs ON rs.id = pe.source_id
             WHERE rs.user_id = ?
@@ -530,7 +584,6 @@ async def get_user_stats(user_id: int) -> dict[str, int]:
     return {
         "channels": n_ch,
         "sources": n_src,
-        "linked_sources": n_linked,
         "posted_entries": n_posted,
     }
 
@@ -702,3 +755,214 @@ async def get_last_event_for_user(user_id: int) -> dict[str, object] | None:
         "message": row[2],
         "created_at": row[3],
     }
+
+
+async def news_inbox_try_add(
+    user_id: int,
+    source_id: int,
+    *,
+    entry_key: str,
+    title: str,
+    link: str,
+    body_text: str,
+    image_url: str | None,
+    published_at: str | None,
+) -> int | None:
+    """
+    Добавляет материал в очередь «новые новости». При дубликате (тот же entry_key у источника)
+    возвращает None.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            """
+            INSERT INTO news_inbox (
+                user_id, source_id, entry_key, title, link, body_text, image_url, published_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, source_id, entry_key) DO NOTHING
+            RETURNING id
+            """,
+            (
+                user_id,
+                source_id,
+                entry_key[:500],
+                title[:2000],
+                link[:2000],
+                body_text[:16000],
+                image_url,
+                published_at,
+            ),
+        )
+        row = await cur.fetchone()
+        await db.commit()
+    return int(row[0]) if row else None
+
+
+async def news_inbox_next_unposted(user_id: int, source_id: int) -> dict[str, object] | None:
+    """Самая ранняя запись в очереди для источника, ещё не помеченная как опубликованная."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT
+                ni.id,
+                ni.source_id,
+                ni.title,
+                ni.link,
+                ni.body_text,
+                ni.image_url,
+                ni.published_at,
+                ni.discovered_at,
+                ni.entry_key,
+                rs.feed_title AS source_feed_title,
+                rs.enabled AS source_enabled
+            FROM news_inbox ni
+            INNER JOIN rss_sources rs
+              ON rs.id = ni.source_id AND rs.user_id = ni.user_id
+            WHERE ni.user_id = ? AND ni.source_id = ?
+              AND NOT EXISTS (
+                SELECT 1 FROM posted_entries pe
+                WHERE pe.source_id = ni.source_id AND pe.entry_key = ni.entry_key
+              )
+            ORDER BY ni.discovered_at ASC, ni.id ASC
+            LIMIT 1
+            """,
+            (user_id, source_id),
+        )
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def news_inbox_delete_by_entry_key(user_id: int, source_id: int, entry_key: str) -> bool:
+    ek = (entry_key or "").strip()[:500]
+    if not ek:
+        return False
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            "DELETE FROM news_inbox WHERE user_id = ? AND source_id = ? AND entry_key = ?",
+            (user_id, source_id, ek),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def news_inbox_list(user_id: int, *, limit: int = 60) -> list[dict[str, object]]:
+    """
+    Все новости в порядке: старые выше, новые ниже (дата из ленты, затем время в очереди).
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT
+                ni.id,
+                ni.source_id,
+                ni.title,
+                ni.link,
+                ni.body_text,
+                ni.image_url,
+                ni.published_at,
+                ni.discovered_at,
+                ni.entry_key,
+                rs.feed_title AS source_feed_title,
+                rs.url AS source_url
+            FROM news_inbox ni
+            INNER JOIN rss_sources rs
+              ON rs.id = ni.source_id AND rs.user_id = ni.user_id
+            WHERE ni.user_id = ?
+            ORDER BY
+                CASE WHEN ni.published_at IS NULL THEN 1 ELSE 0 END,
+                ni.published_at ASC,
+                ni.discovered_at ASC,
+                ni.id ASC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        )
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def news_inbox_newest(user_id: int) -> dict[str, object] | None:
+    """Самая свежая запись в очереди (нижняя в списке при сортировке «старые → новые»)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT
+                ni.id,
+                ni.source_id,
+                ni.title,
+                ni.link,
+                ni.body_text,
+                ni.image_url,
+                ni.published_at,
+                ni.discovered_at,
+                ni.entry_key,
+                rs.feed_title AS source_feed_title,
+                rs.enabled AS source_enabled
+            FROM news_inbox ni
+            INNER JOIN rss_sources rs
+              ON rs.id = ni.source_id AND rs.user_id = ni.user_id
+            WHERE ni.user_id = ?
+            ORDER BY
+                CASE WHEN ni.published_at IS NULL THEN 1 ELSE 0 END,
+                ni.published_at DESC,
+                ni.discovered_at DESC,
+                ni.id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def news_inbox_ordered_ids(user_id: int, *, limit: int = 60) -> list[int]:
+    rows = await news_inbox_list(user_id, limit=limit)
+    return [int(r["id"]) for r in rows]
+
+
+async def news_inbox_get(user_id: int, inbox_id: int) -> dict[str, object] | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT
+                ni.id,
+                ni.source_id,
+                ni.title,
+                ni.link,
+                ni.body_text,
+                ni.image_url,
+                ni.published_at,
+                ni.discovered_at,
+                ni.entry_key,
+                rs.feed_title AS source_feed_title,
+                rs.enabled AS source_enabled
+            FROM news_inbox ni
+            INNER JOIN rss_sources rs
+              ON rs.id = ni.source_id AND rs.user_id = ni.user_id
+            WHERE ni.user_id = ? AND ni.id = ?
+            """,
+            (user_id, inbox_id),
+        )
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def news_inbox_delete(user_id: int, inbox_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            "DELETE FROM news_inbox WHERE user_id = ? AND id = ?",
+            (user_id, inbox_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
